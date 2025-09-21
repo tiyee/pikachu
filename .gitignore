@@ -19,7 +19,7 @@ profile.cov
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
-
+go.sum
 # Go workspace file
 go.work
 go.work.sum
@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+/.idea
+/.vscode
+/.lingma

@@ -1,0 +1,20 @@
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "password"
+  database: "test_db"
+  server_id: 100
+
+tasks:
+- task_id: "user_monitor"
+  name: "用户表变更监控"
+  table_name: "users"
+  events: ["insert", "update", "delete"]
+  callback_url: "https://api.example.com/webhook/user"
+
+- task_id: "order_monitor"
+  name: "订单表变更监控"
+  table_name: "orders"
+  events: ["insert", "update"]
+  callback_url: "https://api.example.com/webhook/order"
