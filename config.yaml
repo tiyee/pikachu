@@ -6,6 +6,15 @@ database:
   database: "test_db"
   server_id: 100
 
+log:
+  level: "info"  # debug, info, warn, error, fatal, panic
+  format: "text" # text, json
+
+server:
+  enabled: true  # 是否启用健康检查服务器
+  port: 8080     # 服务器端口
+  path: "/health" # 健康检查路径
+
 tasks:
 - task_id: "user_monitor"
   name: "用户表变更监控"

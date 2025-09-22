@@ -28,10 +28,37 @@ type EventTask struct {
 	Tasks     []*Task
 }
 
+// LogLevel 日志级别类型
+type LogLevel string
+
+const (
+	LogLevelDebug   LogLevel = "debug"
+	LogLevelInfo    LogLevel = "info"
+	LogLevelWarn    LogLevel = "warn"
+	LogLevelError   LogLevel = "error"
+	LogLevelFatal   LogLevel = "fatal"
+	LogLevelPanic   LogLevel = "panic"
+)
+
+// ServerConfig HTTP服务器配置
+type ServerConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Port    int    `yaml:"port"`
+	Path    string `yaml:"path"`
+}
+
 // Config 配置文件结构
 type Config struct {
 	Database DatabaseConfig `yaml:"database"`
 	Tasks    []Task         `yaml:"tasks"`
+	Log      LogConfig      `yaml:"log"`
+	Server   ServerConfig   `yaml:"server"`
+}
+
+// LogConfig 日志配置
+type LogConfig struct {
+	Level  LogLevel `yaml:"level"`
+	Format string   `yaml:"format"` // text, json
 }
 
 // DatabaseConfig 数据库配置

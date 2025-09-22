@@ -11,18 +11,23 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/go-sql-driver/mysql"
+	"go.uber.org/zap"
 )
+
+// EventCallback 事件回调函数类型
+type EventCallback func()
 
 // Monitor MySQL监控器
 type Monitor struct {
-	config       *Config
-	canal        *canal.Canal
-	eventQueue   chan *ChangeEvent
-	taskMap      map[string]*Task
-	eventTaskMap map[string][]*Task
-	schemaCache  map[string]*TableSchema
-	ctx          context.Context
-	cancel       context.CancelFunc
+	config        *Config
+	canal         *canal.Canal
+	eventQueue    chan *ChangeEvent
+	taskMap       map[string]*Task
+	eventTaskMap  map[string][]*Task
+	schemaCache   map[string]*TableSchema
+	ctx           context.Context
+	cancel        context.CancelFunc
+	eventCallback EventCallback
 }
 
 func getEventTaskId(tableName, eventType string) string {
@@ -46,17 +51,18 @@ func getPrimaryKey(table *schema.Table, newData, oldData map[string]interface{})
 }
 
 // NewMonitor 创建新的监控器
-func NewMonitor(config *Config, eventQueue chan *ChangeEvent) (*Monitor, error) {
+func NewMonitor(config *Config, eventQueue chan *ChangeEvent, eventCallback EventCallback) (*Monitor, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	monitor := &Monitor{
-		config:       config,
-		eventQueue:   eventQueue,
-		taskMap:      make(map[string]*Task),
-		eventTaskMap: make(map[string][]*Task),
-		schemaCache:  make(map[string]*TableSchema),
-		ctx:          ctx,
-		cancel:       cancel,
+		config:        config,
+		eventQueue:    eventQueue,
+		taskMap:       make(map[string]*Task),
+		eventTaskMap:  make(map[string][]*Task),
+		schemaCache:   make(map[string]*TableSchema),
+		ctx:           ctx,
+		cancel:        cancel,
+		eventCallback: eventCallback,
 	}
 
 	// 建立任务映射
@@ -125,7 +131,7 @@ func (m *Monitor) Start() error {
 		return fmt.Errorf("failed to get master position: %w", err)
 	}
 
-	Logger.WithField("position", pos).Info("Starting from master position")
+	Logger.With(zap.Any("position", pos)).Info("Starting from master position")
 
 	// 记录任务启动日志
 	for _, task := range m.config.Tasks {
@@ -231,16 +237,6 @@ func (m *Monitor) OnRow(e *canal.RowsEvent) error {
 	return nil
 }
 
-// shouldMonitorEvent 检查是否应该监控该事件
-func (m *Monitor) shouldMonitorEvent(task *Task, eventType EventType) bool {
-	for _, event := range task.Events {
-		if event == eventType {
-			return true
-		}
-	}
-	return false
-}
-
 // handleInsert 处理插入事件
 func (m *Monitor) handleInsert(e *canal.RowsEvent, task *Task) error {
 	for _, row := range e.Rows {
@@ -259,10 +255,14 @@ func (m *Monitor) handleInsert(e *canal.RowsEvent, task *Task) error {
 
 		select {
 		case m.eventQueue <- event:
+			// 如果有事件回调函数，则调用它
+			if m.eventCallback != nil {
+				m.eventCallback()
+			}
 		case <-m.ctx.Done():
 			return m.ctx.Err()
 		default:
-			Logger.WithField("task_id", task.TaskID).Warn("Event queue is full, dropping event")
+			Logger.Warn("Event queue is full, dropping event", zap.String("task_id", task.TaskID))
 		}
 	}
 	return nil
@@ -291,10 +291,14 @@ func (m *Monitor) handleUpdate(e *canal.RowsEvent, task *Task) error {
 
 		select {
 		case m.eventQueue <- event:
+			// 如果有事件回调函数，则调用它
+			if m.eventCallback != nil {
+				m.eventCallback()
+			}
 		case <-m.ctx.Done():
 			return m.ctx.Err()
 		default:
-			Logger.WithField("task_id", task.TaskID).Warn("Event queue is full, dropping event")
+			Logger.Warn("Event queue is full, dropping event", zap.String("task_id", task.TaskID))
 		}
 	}
 	return nil
@@ -318,10 +322,14 @@ func (m *Monitor) handleDelete(e *canal.RowsEvent, task *Task) error {
 
 		select {
 		case m.eventQueue <- event:
+			// 如果有事件回调函数，则调用它
+			if m.eventCallback != nil {
+				m.eventCallback()
+			}
 		case <-m.ctx.Done():
 			return m.ctx.Err()
 		default:
-			Logger.WithField("task_id", task.TaskID).Warn("Event queue is full, dropping event")
+			Logger.Warn("Event queue is full, dropping event", zap.String("task_id", task.TaskID))
 		}
 	}
 	return nil
@@ -342,16 +350,13 @@ func (m *Monitor) buildRowData(table *schema.Table, row []interface{}) map[strin
 
 // OnRotate 处理日志轮转事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnRotate(header *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
-	Logger.WithField("next_log_name", string(rotateEvent.NextLogName)).Info("Binary log rotated")
+	Logger.Info("Binary log rotated", zap.String("next_log_name", string(rotateEvent.NextLogName)))
 	return nil
 }
 
 // OnTableChanged 处理表结构变更事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnTableChanged(header *replication.EventHeader, schema string, table string) error {
-	Logger.WithFields(map[string]interface{}{
-		"schema": schema,
-		"table":  table,
-	}).Info("Table schema changed")
+	Logger.Info("Table schema changed", zap.String("schema", schema), zap.String("table", table))
 
 	// 重新加载表结构
 	if task, exists := m.taskMap[table]; exists {
@@ -365,7 +370,7 @@ func (m *Monitor) OnTableChanged(header *replication.EventHeader, schema string,
 
 // OnDDL 处理DDL事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnDDL(rh *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
-	Logger.WithField("query", string(queryEvent.Query)).Info("DDL executed")
+	Logger.Info("DDL executed", zap.String("query", string(queryEvent.Query)))
 	return nil
 }
 
@@ -386,10 +391,10 @@ func (m *Monitor) OnRowsQueryEvent(e *replication.RowsQueryEvent) error {
 
 // String 返回处理器名称 - 实现canal.EventHandler接口
 func (m *Monitor) String() string {
-	return "PikachuMonitor"
+	return "pikachuMonitor"
 }
 func (m *Monitor) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	// 可以记录位置同步信息，或保持为空实现
-	Logger.Debugf("Position synced: %v", pos)
+	Logger.Debug("Position synced", zap.Any("position", pos))
 	return nil
 }

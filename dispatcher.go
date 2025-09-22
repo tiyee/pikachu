@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
+	"math"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,6 +18,7 @@ type Dispatcher struct {
 	eventQueue chan *ChangeEvent
 	httpClient *http.Client
 	taskMap    map[string]*Task
+	taskQueue  []chan *CallbackTask
 	ctx        context.Context
 	cancel     context.CancelFunc
 }
@@ -79,29 +83,36 @@ func (d *Dispatcher) eventLoop() {
 
 // worker 工作协程
 func (d *Dispatcher) worker(id int) {
-	Logger.WithField("worker_id", id).Info("Webhook worker started")
+	Logger.Info("Webhook worker started", zap.Int("worker_id", id))
+
+	// 创建工作任务队列
+	taskQueue := make(chan *CallbackTask, 100)
+	d.taskQueue = append(d.taskQueue, taskQueue)
 
 	for {
 		select {
 		case <-d.ctx.Done():
-			Logger.WithField("worker_id", id).Info("Webhook worker stopped")
+			Logger.Info("Webhook worker stopped", zap.Int("worker_id", id))
 			return
-		default:
-			time.Sleep(100 * time.Millisecond)
+		case task := <-taskQueue:
+			// 构建webhook载荷
+			payload := d.buildWebhookPayload(task.Event)
+			// 执行回调
+			d.executeCallback(task, payload)
 		}
 	}
 }
+
+// 工作协程索引，用于轮询分配任务
+var workerIndex int32
 
 // processEvent 处理事件
 func (d *Dispatcher) processEvent(event *ChangeEvent) {
 	task, exists := d.taskMap[event.TaskID]
 	if !exists {
-		Logger.WithField("task_id", event.TaskID).Error("Task not found for event")
+		Logger.Error("Task not found for event", zap.String("task_id", event.TaskID))
 		return
 	}
-
-	// 构建webhook载荷
-	payload := d.buildWebhookPayload(event)
 
 	// 创建回调任务
 	callbackTask := &CallbackTask{
@@ -111,8 +122,11 @@ func (d *Dispatcher) processEvent(event *ChangeEvent) {
 		MaxRetries:  3,
 	}
 
-	// 执行回调
-	d.executeCallback(callbackTask, payload)
+	// 使用轮询算法选择工作协程
+	index := atomic.AddInt32(&workerIndex, 1) % int32(len(d.taskQueue))
+
+	// 将任务发送到选定的工作协程队列
+	d.taskQueue[index] <- callbackTask
 }
 
 // buildWebhookPayload 构建webhook载荷
@@ -154,7 +168,7 @@ func (d *Dispatcher) executeCallback(callbackTask *CallbackTask, payload *Webhoo
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Pikachu/1.0")
+	req.Header.Set("User-Agent", "pikachu/1.0")
 
 	// 发送请求
 	resp, err := d.httpClient.Do(req)
@@ -174,7 +188,7 @@ func (d *Dispatcher) executeCallback(callbackTask *CallbackTask, payload *Webhoo
 		return
 	}
 
-	Logger.WithField("task_id", callbackTask.Event.TaskID).Info("Webhook callback successful")
+	Logger.Info("Webhook callback successful", zap.String("task_id", callbackTask.Event.TaskID))
 }
 
 // handleCallbackError 处理回调错误
@@ -189,8 +203,13 @@ func (d *Dispatcher) handleCallbackError(callbackTask *CallbackTask, payload *We
 
 	// 延迟重试
 	callbackTask.RetryCount++
-	go func() {
-		time.Sleep(60 * time.Second) // 60秒后重试
-		d.executeCallback(callbackTask, payload)
-	}()
+	go func(task *CallbackTask) {
+		// 指数退避重试策略，基础10秒，每次重试增加一倍
+		sleepTime := time.Duration(math.Pow(2, float64(task.RetryCount))) * 10 * time.Second
+		time.Sleep(sleepTime)
+		// 使用轮询算法选择工作协程
+		index := atomic.AddInt32(&workerIndex, 1) % int32(len(d.taskQueue))
+		// 将重试任务发送到工作协程队列
+		d.taskQueue[index] <- task
+	}(callbackTask)
 }

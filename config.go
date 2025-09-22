@@ -5,12 +5,12 @@ import (
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
-	"io/ioutil"
+	"os"
 )
 
 // LoadConfig 加载YAML配置文件
 func LoadConfig(filename string) (*Config, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -64,10 +64,12 @@ func CheckDatabasePermissions(config *DatabaseConfig) error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// 检查权限
+	// 检查权限 - 最小化权限集
+	// 仅包含应用程序实际需要的权限
 	requiredPrivileges := []string{
-		"SELECT", "RELOAD", "SHOW DATABASES",
-		"REPLICATION SLAVE", "REPLICATION CLIENT",
+		"SELECT",             // 用于获取表结构信息
+		"REPLICATION SLAVE",  // 用于连接二进制日志并接收变更事件
+		"REPLICATION CLIENT", // 用于获取主服务器的位置信息
 	}
 
 	rows, err := db.Query("SHOW GRANTS FOR CURRENT_USER()")
