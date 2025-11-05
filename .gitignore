@@ -9,6 +9,7 @@
 *.dylib
 
 # Test binary, built with `go test -c`
+/tests
 *.test
 
 # Code coverage profiles and other test artifacts
@@ -19,7 +20,6 @@ profile.cov
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
-go.sum
 # Go workspace file
 go.work
 go.work.sum
@@ -28,11 +28,16 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
-/.idea
-/.vscode
-/.lingma
-/.trae
-/.cursor
-/.gitignore
+.idea/
+.vscode/
+.lingma/
+.trae/
+.cursor/
+.codebuddy
+
+# Configuration files (keep examples)
+config.yaml
+tasks.yaml
+
+# Project-specific
+.spec/
