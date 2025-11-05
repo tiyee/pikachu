@@ -10,7 +10,7 @@ env:
   # 阿里云容器镜像仓库地址
   REGISTRY: ${{ vars.REGISTRY }}
   # 镜像名称
-  IMAGE_NAME: ${{ vars.IMAGE_NAME}}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME }}
 
 jobs:
   build-and-push:
