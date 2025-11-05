@@ -41,3 +41,4 @@ tasks.yaml
 
 # Project-specific
 .spec/
+.gitignore
