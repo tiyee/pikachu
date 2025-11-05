@@ -3,7 +3,8 @@ FROM golang:latest AS builder
 
 # 设置工作目录
 WORKDIR /app
-
+ENV GO111MODULE=on
+ENV GOPROXY=https://goproxy.cn,direct
 # 复制go.mod和go.sum文件并下载依赖
 COPY go.mod go.sum ./
 RUN go mod download
@@ -12,17 +13,13 @@ RUN go mod download
 COPY . .
 
 # 编译应用程序
-RUN CGO_ENABLED=0 GOOS=linux go build -o pikachu
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o pikachu
 
 # 第二阶段：运行阶段
 FROM alpine:latest
 
-# 创建非root用户运行应用
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
 # 创建日志目录
-RUN mkdir -p /app/logs && chown -R appuser:appgroup /app/logs
-
+RUN mkdir -p /app/logs
 # 安装证书以支持HTTPS
 RUN apk --no-cache add ca-certificates
 
@@ -34,9 +31,8 @@ COPY --from=builder /app/pikachu .
 
 # 复制配置文件
 COPY config.yaml .
+COPY tasks.yaml .
 
-# 切换到非root用户
-USER appuser
 
 # 声明卷以持久化日志
 VOLUME /app/logs

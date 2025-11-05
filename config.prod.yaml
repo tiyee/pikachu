@@ -1,0 +1,34 @@
+# 生产环境配置示例
+
+database:
+  host: "prod-db.example.com"
+  port: 3306
+  user: "pikachu_prod"
+  password: "secure_password_here"
+  database: "production_db"
+  server_id: 1001
+
+log:
+  level: "warn"  # 生产环境使用warn级别
+  format: "json" # 生产环境使用json格式便于日志收集
+
+server:
+  enabled: true
+  port: 8080
+  path: "/health"
+
+# 分发器配置 - 生产环境更高性能
+dispatcher:
+  worker_count: 10    # 更多工作协程
+  queue_size: 500     # 更大队列
+  timeout: 60s        # 更长超时
+  max_retries: 5      # 更多重试
+  retry_base_delay: 30s # 更长重试延迟
+
+# 监控器配置
+monitor:
+  event_queue_size: 5000   # 更大事件队列
+  event_queue_timeout: 10s # 更长超时时间
+
+# 回调主机配置 - 用于不同环境
+callback_host: "https://api.example.com" # 生产环境回调主机地址

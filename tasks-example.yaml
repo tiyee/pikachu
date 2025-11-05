@@ -1,0 +1,19 @@
+tasks:
+  - task_id: "user_monitor"
+    name: "用户表变更监控"
+    table_name: "users"
+    events: ["insert", "update", "delete"]
+    callback_url: "/webhook/user"  # 使用相对路径，将与callback_host组合
+
+  - task_id: "order_monitor"
+    name: "订单表变更监控"
+    table_name: "orders"
+    events: ["insert", "update"]
+    callback_url: "/webhook/order"  # 使用相对路径，将与callback_host组合
+
+  # 示例：仍然支持绝对URL（用于特殊场景）
+  - task_id: "external_service"
+    name: "外部服务监控"
+    table_name: "logs"
+    events: ["insert"]
+    callback_url: "https://external-api.example.com/webhook/log"  # 绝对URL，直接使用

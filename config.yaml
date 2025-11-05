@@ -5,25 +5,26 @@ database:
   password: "password"
   database: "test_db"
   server_id: 100
+  charset: "utf8mb4"
 
 log:
-  level: "info"  # debug, info, warn, error, fatal, panic
-  format: "text" # text, json
+  level: "info"
+  format: "text"
 
 server:
-  enabled: true  # 是否启用健康检查服务器
-  port: 8080     # 服务器端口
-  path: "/health" # 健康检查路径
+  enabled: true
+  port: 8080
+  path: "/health"
 
-tasks:
-- task_id: "user_monitor"
-  name: "用户表变更监控"
-  table_name: "users"
-  events: ["insert", "update", "delete"]
-  callback_url: "https://api.example.com/webhook/user"
+dispatcher:
+  worker_count: 5
+  queue_size: 100
+  timeout: 30s
+  max_retries: 3
+  retry_base_delay: 10s
 
-- task_id: "order_monitor"
-  name: "订单表变更监控"
-  table_name: "orders"
-  events: ["insert", "update"]
-  callback_url: "https://api.example.com/webhook/order"
+monitor:
+  event_queue_size: 1000
+  event_queue_timeout: 5s
+
+callback_host: ""

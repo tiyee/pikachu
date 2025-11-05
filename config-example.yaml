@@ -1,0 +1,43 @@
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "password"
+  database: "test_db"
+  server_id: 100
+  # charset: "utf8mb4" # 可配置，不设置则默认为utf8mb4
+
+log:
+  level: "info" # debug, info, warn, error, fatal, panic
+  format: "text" # text, json
+
+server:
+  enabled: true # 是否启用健康检查服务器
+  port: 8080 # 服务器端口
+  path: "/health" # 健康检查路径
+
+# 分发器配置 (优化后的高性能配置)
+dispatcher:
+  worker_count: 20         # 工作协程数量 (提高并发处理能力)
+  queue_size: 1000         # 队列大小 (增加缓冲区)
+  timeout: 30s             # HTTP请求超时
+  max_retries: 3           # 最大重试次数
+  retry_base_delay: 5s     # 重试基础延迟 (减少恢复时间)
+  retry_max_delay: 60s     # 最大重试延迟 (防止过长等待)
+  max_connections: 100     # 最大并发连接数 (提高HTTP并发)
+  max_idle_conns: 20       # 最大空闲连接数 (连接池优化)
+  idle_conn_timeout: 90s   # 空闲连接超时
+  # 注意: 保持HTTP/1.1兼容性，不强制HTTP/2，确保与各种回调服务端兼容
+  batch_size: 1            # 批处理大小 (默认1，保持实时性)
+  batch_timeout: 100ms     # 批处理超时
+
+# 监控器配置 (优化后的高性能配置)
+monitor:
+  event_queue_size: 10000    # 事件队列大小 (大幅增加缓冲)
+  event_queue_timeout: 2s    # 事件队列超时时间 (减少延迟)
+  batch_size: 1              # 批处理大小 (默认1，保持实时性)
+  batch_timeout: 50ms        # 批处理超时
+  flush_interval: 1s         # 刷新间隔
+
+# 注意：任务配置已分离到 tasks.yaml 文件中
+# 请参考 tasks-example.yaml 文件了解任务配置格式

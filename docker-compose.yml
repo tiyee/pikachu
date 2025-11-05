@@ -6,12 +6,13 @@ services:
     container_name: pikachu
     restart: unless-stopped
     ports:
-      - "8080:8080"  # 健康检查端口映射
+      - "8080:8080"
     volumes:
-      - /data/logs/pikachu:/app/logs  # 日志目录映射到宿主机
-      - ./config.yaml:/app/config.yaml:ro  # 配置文件只读挂载
+      - /data/logs/pikachu:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+      - ./tasks.yaml:/app/tasks.yaml:ro
     environment:
-      - TZ=Asia/Shanghai  # 设置时区
+      - TZ=Asia/Shanghai
     networks:
       - pikachu_network
 
