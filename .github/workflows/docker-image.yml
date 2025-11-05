@@ -5,6 +5,11 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'  # 严格匹配 vN.N.N 格式
   workflow_dispatch:  # 允许手动触发
+    inputs:
+      version:
+        description: '版本号 (格式: vX.X.X，例如: v1.0.0)'
+        required: true
+        type: string
 
 env:
   # 阿里云容器镜像仓库地址
@@ -13,8 +18,40 @@ env:
   IMAGE_NAME: ${{ vars.IMAGE_NAME }}
 
 jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      is_valid: ${{ steps.validate.outputs.is_valid }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Validate version format
+        id: validate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # 手动触发时使用输入的版本号
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # 标签触发时使用标签名
+            VERSION="${{ github.ref_name }}"
+          fi
+          
+          # 验证版本号格式
+          if echo "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "✅ 版本号格式正确: $VERSION"
+            echo "is_valid=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 版本号格式错误: $VERSION"
+            echo "请使用 vX.X.X 格式 (例如: v1.0.0)"
+            echo "is_valid=false" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: validate-version
+    if: needs.validate-version.outputs.is_valid == 'true'
     permissions:
       contents: read
       packages: write
@@ -35,6 +72,14 @@ jobs:
           username: ${{ secrets.ALIYUN_USERNAME }}
           password: ${{ secrets.ALIYUN_PASSWORD }}
 
+      # 显示版本信息
+      - name: Display version info
+        run: |
+          echo "=== 版本信息 ==="
+          echo "触发方式: ${{ github.event_name }}"
+          echo "版本号: ${{ needs.validate-version.outputs.version }}"
+          echo "Commit SHA: ${{ github.sha }}"
+
       # 构建并推送 Docker 镜像（包含版本tag和latest）
       - name: Build and push Docker image
         uses: docker/build-push-action@v6.18.0
@@ -43,11 +88,11 @@ jobs:
           file: ./Dockerfile  # 你的 Dockerfile 路径
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.validate-version.outputs.version }}
             ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.title=${{ env.IMAGE_NAME }}
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ needs.validate-version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ fromJSON('{}').now }}  # 动态生成创建时间
           cache-from: type=gha
@@ -57,6 +102,6 @@ jobs:
       - name: Output image info
         run: |
           echo "=== 构建完成 ==="
-          echo "版本 Tag: ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+          echo "版本 Tag: ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.validate-version.outputs.version }}"
           echo "Latest Tag: ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest"
           echo "Commit SHA: ${{ github.sha }}"
