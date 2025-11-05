@@ -30,8 +30,8 @@ WORKDIR /app
 COPY --from=builder /app/pikachu .
 
 # 复制配置文件
-COPY config.yaml .
-COPY tasks.yaml .
+# COPY config.yaml .
+# COPY tasks.yaml .
 
 
 # 声明卷以持久化日志
