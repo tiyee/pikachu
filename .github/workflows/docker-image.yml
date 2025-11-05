@@ -1,0 +1,62 @@
+name: Build and Push to ACR on Tag
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # 严格匹配 vN.N.N 格式
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  # 阿里云容器镜像仓库地址
+  REGISTRY: registry.cn-hangzhou.aliyuncs.com  # 根据你的地域修改
+  # 镜像名称
+  IMAGE_NAME: your-app-name
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 设置 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.0.0
+
+      # 登录阿里云容器镜像服务
+      - name: Log into Alibaba Cloud ACR
+        uses: docker/login-action@v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      # 构建并推送 Docker 镜像（包含版本tag和latest）
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5.0.0
+        with:
+          context: .
+          file: ./Dockerfile  # 你的 Dockerfile 路径
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ fromJSON('{}').now }}  # 动态生成创建时间
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 输出镜像信息
+      - name: Output image info
+        run: |
+          echo "=== 构建完成 ==="
+          echo "版本 Tag: ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+          echo "Latest Tag: ${{ env.REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest"
+          echo "Commit SHA: ${{ github.sha }}"
