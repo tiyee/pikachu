@@ -23,9 +23,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # 设置 Docker Buildx
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.11.1
+
 
       # 登录阿里云容器镜像服务
       - name: Log into Alibaba Cloud ACR
