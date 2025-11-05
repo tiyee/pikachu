@@ -8,9 +8,9 @@ on:
 
 env:
   # 阿里云容器镜像仓库地址
-  REGISTRY: registry.cn-hangzhou.aliyuncs.com  # 根据你的地域修改
+  REGISTRY: ${{ vars.REGISTRY }}
   # 镜像名称
-  IMAGE_NAME: your-app-name
+  IMAGE_NAME: ${{ vars.IMAGE_NAME}}
 
 jobs:
   build-and-push:
