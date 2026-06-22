@@ -13,7 +13,9 @@ import (
 )
 
 // LoadConfig 加载YAML配置文件
-func LoadConfig(filename string) (*types.Config, error) {
+// tasksFile 指定任务配置文件路径，为空时默认使用 "tasks.yaml"
+func LoadConfig(filename, tasksFile string) (*types.Config, error) {
+
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -26,7 +28,7 @@ func LoadConfig(filename string) (*types.Config, error) {
 	}
 
 	// 尝试加载tasks配置文件
-	tasks, err := LoadTasks("tasks.yaml")
+	tasks, err := LoadTasks(tasksFile)
 	if err != nil {
 		// 如果tasks.yaml不存在，尝试从原配置文件中加载tasks（向后兼容）
 		if len(config.Tasks) == 0 {

@@ -42,17 +42,18 @@ var globalMetrics *metrics.Metrics
 func main() {
 	// 解析命令行参数
 	configFile := flag.String("config", "config.yaml", "配置文件路径")
+	tasksFile := flag.String("tasks", "tasks.yaml", "任务配置文件路径")
 	showVersion := flag.Bool("version", false, "显示版本信息")
 	flag.Parse()
 
 	// 如果请求显示版本，则显示并退出
 	if *showVersion {
-		fmt.Printf("pikachu version %s\n", utils.Version)
+		fmt.Printf("Pikachu version %s\n", utils.Version)
 		return
 	}
 
 	// 加载配置
-	cfg, err := config.LoadConfig(*configFile)
+	cfg, err := config.LoadConfig(*configFile, *tasksFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		return
@@ -70,7 +71,7 @@ func main() {
 		return
 	}
 
-	log.Info("Starting pikachu MySQL monitor tool",
+	log.Info("Starting Pikachu MySQL monitor tool",
 		zap.String("version", utils.Version))
 	log.Info("LoadConfig success")
 	log.Info("ValidateConfig success")
@@ -125,7 +126,7 @@ func main() {
 
 	// 等待一小段时间确保监控器正常启动
 	time.Sleep(2 * time.Second)
-	log.Info("pikachu started successfully")
+	log.Info("Pikachu started successfully")
 
 	// 等待中断信号
 	sigChan := make(chan os.Signal, 1)
@@ -144,7 +145,7 @@ func main() {
 	mon.Stop()
 	dispatch.Stop()
 
-	log.Info("pikachu stopped")
+	log.Info("Pikachu stopped")
 	// 关闭日志器，确保所有日志都被刷新
 	log.Close()
 }

@@ -45,7 +45,7 @@ func Errorf(format string, args ...interface{}) error {
 }
 
 // Version 应用版本信息
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 // GetUserAgent 获取用户代理字符串
 func GetUserAgent() string {

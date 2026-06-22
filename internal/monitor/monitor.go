@@ -481,6 +481,16 @@ func (m *Monitor) OnRowsQueryEvent(e *replication.RowsQueryEvent) error {
 	return nil
 }
 
+// OnTableNotFound 处理行事件引用的表不存在的情况 - 实现canal.EventHandler接口
+// 当 binlog 行事件引用了一张找不到元数据的表（例如已被删除）时，canal 会调用此方法。
+// 这里仅记录告警并返回 nil，让 CDC 流水线继续运行，而不是因为单张表缺失而中断。
+func (m *Monitor) OnTableNotFound(header *replication.EventHeader, e *replication.RowsEvent) error {
+	log.Warn("Rows event references a table that no longer exists, skipping",
+		log.String("schema", string(e.Table.Schema)),
+		log.String("table", string(e.Table.Table)))
+	return nil
+}
+
 // String 返回处理器名称 - 实现canal.EventHandler接口
 func (m *Monitor) String() string {
 	return "pikachuMonitor"
