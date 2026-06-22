@@ -42,6 +42,7 @@ EXPOSE 8080
 
 # 设置环境变量
 ENV CONFIG_PATH=config.yaml
+ENV TASKS_PATH=tasks.yaml
 
 # 运行应用程序
-CMD ["./pikachu", "-config", "config.yaml"]
+CMD ["./pikachu", "-config", "config.yaml", "-tasks", "tasks.yaml"]

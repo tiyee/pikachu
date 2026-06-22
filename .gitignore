@@ -43,6 +43,9 @@ tasks.yaml
 .spec/
 .gitignore
 
+CLAUDE.md
+.claude
+
 
 /memory-bank
-CLAUDE.md
+
