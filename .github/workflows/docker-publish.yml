@@ -6,14 +6,15 @@ name: Docker
 # documentation.
 
 on:
-  schedule:
-    - cron: '31 17 * * *'
   push:
-    branches: [ "master" ]
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "master" ]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # 严格匹配 vN.N.N 格式
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      version:
+        description: '版本号 (格式: vX.X.X，例如: v1.0.0)'
+        required: true
+        type: string
 
 env:
   # Use docker.io for Docker Hub if empty
