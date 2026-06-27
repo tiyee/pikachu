@@ -79,7 +79,6 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.tags }}
             ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'latest' || '' }}
-            ${{ github.event_name == 'workflow_dispatch' && 'latest' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
