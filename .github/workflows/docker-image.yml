@@ -97,6 +97,8 @@ jobs:
             org.opencontainers.image.created=${{ fromJSON('{}').now }}  # 动态生成创建时间
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
 
       # 输出镜像信息
       - name: Output image info
