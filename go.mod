@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/go-mysql-org/go-mysql v1.16.0
-	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-sql-driver/mysql v1.10.1
 	go.uber.org/zap v1.28.0
 	gopkg.in/yaml.v3 v3.0.1
 )
