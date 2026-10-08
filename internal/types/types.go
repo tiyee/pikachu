@@ -50,6 +50,7 @@ type ServerConfig struct {
 
 // DispatcherConfig 分发器配置
 type DispatcherConfig struct {
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`  // 停止生产后等待回调排空的期限
 	WorkerCount     int           `yaml:"worker_count"`      // 工作协程数量
 	QueueSize       int           `yaml:"queue_size"`        // 队列大小
 	Timeout         time.Duration `yaml:"timeout"`           // HTTP请求超时

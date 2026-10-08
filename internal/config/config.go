@@ -74,10 +74,19 @@ func ValidateConfig(config *types.Config) error {
 	}
 
 	// 验证任务配置
+	ids := make(map[string]int)
 	for i, task := range config.Tasks {
+		if previous, exists := ids[task.TaskID]; exists {
+			return fmt.Errorf("task[%d]: duplicate task_id %q (first at task[%d])", i, task.TaskID, previous)
+		}
+		ids[task.TaskID] = i
 		if err := validateTaskConfig(&task, i); err != nil {
 			return err
 		}
+	}
+
+	if config.Dispatcher.ShutdownTimeout < 0 {
+		return fmt.Errorf("shutdown_timeout cannot be negative")
 	}
 
 	// 设置默认值
@@ -186,6 +195,9 @@ func validateCallbackURL(urlStr string) error {
 
 // setDefaultValues 设置默认值
 func setDefaultValues(config *types.Config) {
+	if config.Dispatcher.ShutdownTimeout == 0 {
+		config.Dispatcher.ShutdownTimeout = 30 * time.Second
+	}
 	// 设置分发器默认值
 	if config.Dispatcher.WorkerCount <= 0 {
 		config.Dispatcher.WorkerCount = 20 // 增加默认工作协程数量以提高并发性能

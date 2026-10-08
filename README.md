@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go" alt="Go Version">
+    <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat&logo=go" alt="Go Version">
   </a>
   <a href="https://github.com/tiyee/pikachu">
     <img src="https://img.shields.io/badge/MySQL-5.6+-4479A1?style=flat&logo=mysql" alt="MySQL Version">
@@ -27,6 +27,14 @@
 </p>
 
 pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC)工具。它通过解析 MySQL 的 binlog 日志来实时捕获数据库表的变更事件（插入、更新、删除），并将这些变更通过 webhook 的方式发送到指定的回调地址。
+
+## 投递与关闭语义
+
+本项目保持尽力投递，不保存或恢复 binlog 位点，不保证百分百不丢。每次启动从当前 master position 开始，停机期间及异常退出前未完成的事件不会补发；没有至少一次或恰好一次保证，接收端仍应处理重复与乱序。
+
+队列满时等待空位，不再因短时拥塞主动丢弃。每次变更独立序列化，重试由固定数量的 worker 执行，不与其他变更共享 JSON。回调耗尽重试后记录失败及丢弃计数，继续处理其他事件。
+
+`dispatcher.shutdown_timeout` 默认 30s：先停止 Monitor，再排空已接收的回调；到期取消剩余 HTTP 和重试，未完成事件计入失败及丢弃，不持久保存。该期限只覆盖分发器排空阶段，数据库组件停止需额外留出时间；Compose 提供 45s 停止宽限期。`monitor.event_queue_timeout` 现在只控制队列拥塞的告警间隔，触发后继续等待。
 
 ## ⚡ 性能指标
 
@@ -49,7 +57,7 @@ pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC
 
 ### 🚀 性能与可靠性
 - **高并发处理**: 基于协程池的并发 webhook 分发
-- **智能重试**: 指数退避重试机制，确保消息不丢失
+- **智能重试**: 指数退避重试，耗尽重试后记录失败并继续处理
 - **性能优化**: URL 预构建，避免运行时重复计算
 - **内存效率**: 事件队列缓冲，支持流量突发处理
 
@@ -57,7 +65,7 @@ pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC
 - **配置灵活**: YAML 配置文件，支持多环境部署
 - **MySQL 兼容**: 自动处理 MySQL 关键字表名
 - **健康检查**: 内置 HTTP 监控端点
-- **优雅关闭**: 支持优雅关闭，确保事件处理完成
+- **优雅关闭**: 停止生产后限时排空；超时取消并记录未完成事件
 
 ### 🐳 部署友好
 - **Docker 支持**: 提供 Docker 和 Docker Compose 部署方案
@@ -67,7 +75,7 @@ pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC
 ## 📋 系统要求
 
 ### 最低要求
-- **Go**: 1.25+ (如果从源码编译)
+- **Go**: 1.27+ (如果从源码编译)
 - **MySQL**: 5.6+ 或 MariaDB 10.0+（需要开启二进制日志）
 - **内存**: 最少 128MB，推荐 512MB+
 - **磁盘**: 最少 50MB 可用空间
@@ -82,7 +90,7 @@ pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC
 ```mermaid
 graph TB
     A[MySQL Database] -->|Binlog Events| B[Monitor Component]
-    B --> C[Event Queue<br/>Size: 10,000]
+    B --> C[Event Queue<br/>Size: 10,000 / Backpressure]
     C --> D[Dispatcher Worker Pool<br/>Workers: 20-50]
     D --> E[Webhook Callbacks<br/>Retry Logic]
 
@@ -125,14 +133,14 @@ graph TB
 1. **Binlog 监听**: Monitor 组件通过 canal 库监听 MySQL binlog 事件
 2. **事件过滤**: 根据任务配置过滤表名和事件类型
 3. **队列缓冲**: 事件进入高内存队列，支持流量突发
-4. **并发分发**: Worker Pool 并发处理 webhook 请求
+4. **并发分发**: 共享有界队列与 Worker Pool 并发处理 webhook 请求
 5. **重试机制**: 失败请求采用指数退避重试策略
 6. **状态监控**: 实时收集和暴露系统指标
 
 ### 🎯 设计亮点
 
 - **事件驱动架构**: 非阻塞式事件处理，支持高并发
-- **内存优化**: 对象池和 JSON 缓存，减少 GC 压力
+- **任务生命周期**: 每个 worker 独占一次变更及其 JSON，重试结束即释放
 - **智能重试**: 指数退避算法，避免对下游服务造成压力
 - **URL 预构建**: 启动时预构建所有回调 URL，提升运行时性能
 - **MySQL 关键字处理**: 自动识别和转义 MySQL 保留字表名
@@ -210,7 +218,7 @@ dispatcher:
   queue_size: 1000         # 队列大小 (支持突发流量)
   timeout: 30s             # HTTP请求超时
   max_retries: 3           # 最大重试次数
-  retry_base_delay: 5s     # 重试基础延迟 (最小3s)
+  retry_base_delay: 5s     # 重试基础延迟 (最小1s)
   max_connections: 100     # 最大连接数
 
 # 监控器配置
@@ -352,26 +360,27 @@ docker-compose up -d
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| worker_count | int | 否 | 工作协程数量 (默认: 5) |
-| queue_size | int | 否 | 队列大小 (默认: 100) |
+| worker_count | int | 否 | 工作协程数量 (默认: 20) |
+| queue_size | int | 否 | 每 worker 的容量预算，共享队列总容量为 worker_count × queue_size (默认: 1000) |
 | timeout | duration | 否 | HTTP请求超时时间 (默认: 30s) |
 | max_retries | int | 否 | 最大重试次数 (默认: 3) |
-| retry_base_delay | duration | 否 | 重试基础延迟 (默认: 10s，最小: 3s*) |
+| shutdown_timeout | duration | 否 | 停止生产后等待回调排空的期限，默认 30s，不能为负 |
+| retry_base_delay | duration | 否 | 重试基础延迟 (默认: 5s，最小: 1s，首次实际等待 2 倍) |
 
-***注意**: 如果设置了 `max_retries > 0`，则 `retry_base_delay` 不能小于 3 秒，以避免对目标服务造成过大压力。
+***注意**: 如果设置了 `max_retries > 0`，则 `retry_base_delay` 不能小于 1 秒，以避免对目标服务造成过大压力。
 
 ### 监控器配置
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| event_queue_size | int | 否 | 事件队列大小 (默认: 1000) |
-| event_queue_timeout | duration | 否 | 事件队列超时时间 (默认: 5s) |
+| event_queue_size | int | 否 | 事件队列大小 (默认: 10000) |
+| event_queue_timeout | duration | 否 | 队列拥塞告警间隔，默认 2s，触发后继续等待，不丢事件 |
 
 ### 任务配置
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| task_id | string | 是 | 任务唯一标识 |
+| task_id | string | 是 | 任务唯一标识，重复值在启动时拒绝 |
 | name | string | 是 | 任务名称 |
 | table_name | string | 是 | 要监控的表名（支持MySQL关键字） |
 | events | []string | 是 | 要监控的事件类型 (insert/update/delete) |
@@ -422,7 +431,7 @@ Pikachu 支持配置文件分离，便于多环境部署：
 6. **事件处理**: 捕获的变更事件通过事件队列传递给分发器
 7. **Webhook 发送**: 分发器将事件以 webhook 形式发送到指定地址
 8. **健康检查**: 提供 HTTP 健康检查和系统状态监控
-9. **优雅关闭**: 支持优雅关闭，确保事件处理完成
+9. **优雅关闭**: 停止生产后限时排空；超时取消并记录未完成事件
 
 ## 权限要求
 
@@ -477,9 +486,7 @@ Pikachu 提供了完整的 HTTP 监控端点：
   "monitor_running": true,
   "dispatcher_running": true,
   "event_queue_size": 0,
-  "last_event_time": "2023-05-15T10:30:45Z",
-  "uptime": "2h45m30s",
-  "version": "v1.0.0"
+  "last_event_time": "2023-05-15T10:30:45Z"
 }
 ```
 
@@ -490,62 +497,30 @@ Pikachu 提供了完整的 HTTP 监控端点：
 - `dispatcher_running`: 分发器是否正在运行
 - `event_queue_size`: 当前事件队列中的待处理事件数量
 - `last_event_time`: 最后一次接收到事件的时间
-- `uptime`: 服务运行时间
-- `version`: pikachu 版本号
 
 ### 📊 系统指标端点
 
-**端点**: `GET http://<host>:<port>/metrics`
+**端点**: `GET http://<host>:<port>/metrics-json`，与健康接口一同由 `server.enabled` 控制；没有 Prometheus `/metrics` 端点。
 
-**响应示例**:
 ```json
 {
-  "system": {
-    "goroutines": 15,
-    "memory_alloc": "2.5MB",
-    "memory_total": "15.2MB",
-    "gc_cycles": 42
-  },
-  "monitor": {
-    "status": "running",
-    "tables_monitored": 5,
-    "total_events_processed": 10250,
-    "events_per_second": 12.5,
-    "last_event_time": "2023-05-15T10:30:45Z",
-    "binlog_position": {
-      "file": "mysql-bin.000123",
-      "position": 456789
-    }
-  },
-  "dispatcher": {
-    "status": "running",
-    "workers_active": 3,
-    "workers_total": 5,
-    "queue_size": 0,
-    "queue_capacity": 100,
-    "webhooks_sent": 10245,
-    "webhooks_failed": 5,
-    "success_rate": 99.95,
-    "avg_response_time": "125ms"
-  },
-  "tasks": [
-    {
-      "task_id": "user_monitor",
-      "table_name": "users",
-      "events_processed": 5230,
-      "last_processed": "2023-05-15T10:30:42Z",
-      "status": "active"
-    },
-    {
-      "task_id": "order_monitor",
-      "table_name": "orders",
-      "events_processed": 5020,
-      "last_processed": "2023-05-15T10:30:45Z",
-      "status": "active"
-    }
-  ]
+  "task_count": 3,
+  "monitor_running": true,
+  "dispatcher_running": true,
+  "event_queue_size": 0,
+  "last_event_time": "2026-10-09T12:00:00Z",
+  "events_queued": 100,
+  "events_succeeded": 99,
+  "events_failed": 0,
+  "events_dropped": 0,
+  "webhook_retries": 2,
+  "cache_size": 1
 }
 ```
+
+指标来自分发器使用的同一实例，均为当前进程值：queued 是进入 worker 队列的变更总数；succeeded 是成功回调数；failed 是耗尽重试或被取消、已放弃的变更数；retries 是实际重试次数。dropped 记录最终失败及取消后放弃的事件（单纯拥塞不增加该值）；cache_size 改为 worker 正持有的独立 JSON 载荷数，完成后归零。没有跨事件 JSON 缓存。event_queue_size 仅指 Monitor 输出队列，不含 worker 队列。
+
+组件 running 表示已完成本地初始化且循环未退出，不证明数据库连接的新鲜度或端到端实时性。启动和停止阶段健康接口返回 DOWN；单个回调最终失败不会停止分发器，需通过失败计数监控。
 
 ### 🔧 API 响应码说明
 

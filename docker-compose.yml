@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: pikachu
     restart: unless-stopped
+    stop_grace_period: 45s
     ports:
       - "8080:8080"
     volumes:

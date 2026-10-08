@@ -14,24 +14,24 @@ test: test-unit
 # Run unit tests
 test-unit:
 	@echo "🧪 Running unit tests..."
-	go test ./tests/ -v
+	go test ./... -v
 
 # Run tests with race detector
 test-race:
 	@echo "🏃 Running tests with race detector..."
-	go test ./tests/ -race -v
+	go test ./... -race -v
 
 # Run tests with coverage
 test-coverage:
 	@echo "📊 Running tests with coverage..."
-	go test ./tests/ -cover -coverprofile=coverage.out -v
+	go test ./... -cover -coverprofile=coverage.out -v
 	@echo "Coverage report generated: coverage.out"
 	@echo "Run 'go tool cover -html=coverage.out' to view HTML report"
 
 # Run benchmark tests
 test-benchmark:
 	@echo "⚡ Running benchmark tests..."
-	go test ./tests/ -bench=. -benchmem -v
+	go test ./... -bench=. -benchmem -v
 
 # Run comprehensive test suite
 test-all: test-unit test-race test-coverage test-benchmark
@@ -77,7 +77,7 @@ prod-checks: lint test-race test-coverage
 # Watch for changes and run tests (requires entr)
 watch:
 	@echo "👀 Watching for changes..."
-	find . -name "*.go" | entr -r go test ./tests/ -v
+	find . -name "*.go" | entr -r go test ./... -v
 
 # Show help
 help:

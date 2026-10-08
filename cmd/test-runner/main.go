@@ -34,19 +34,19 @@ func main() {
 	}{
 		{
 			name: "Unit Tests",
-			args: []string{"test", "./tests/", "-v"},
+			args: []string{"test", "./...", "-v"},
 		},
 		{
 			name: "Race Condition Tests",
-			args: []string{"test", "./tests/", "-race", "-v"},
+			args: []string{"test", "./...", "-race", "-v"},
 		},
 		{
 			name: "Coverage Report",
-			args: []string{"test", "./tests/", "-cover", "-coverprofile=coverage.out", "-v"},
+			args: []string{"test", "./...", "-cover", "-coverprofile=coverage.out", "-v"},
 		},
 		{
 			name: "Benchmark Tests",
-			args: []string{"test", "./tests/", "-bench=.", "-benchmem", "-v"},
+			args: []string{"test", "./...", "-bench=.", "-benchmem", "-v"},
 		},
 	}
 

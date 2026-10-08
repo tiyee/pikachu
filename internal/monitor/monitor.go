@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -24,6 +25,7 @@ type EventCallback func()
 
 // Monitor MySQL监控器
 type Monitor struct {
+	running       atomic.Bool
 	config        *types.Config
 	canal         *canal.Canal
 	eventQueue    chan *types.ChangeEvent
@@ -168,6 +170,7 @@ func (m *Monitor) buildTableRegex() []string {
 
 // Start 启动监控
 func (m *Monitor) Start() error {
+	defer m.running.Store(false)
 	log.Info("Starting MySQL monitor")
 
 	// 加载表结构
@@ -175,12 +178,14 @@ func (m *Monitor) Start() error {
 		return fmt.Errorf("failed to load table schemas: %w", err)
 	}
 
-	// 启动canal
+	// 保持尽力投递语义，每次启动从当前 master position 开始。
 	pos, err := m.canal.GetMasterPos()
 	if err != nil {
 		return fmt.Errorf("failed to get master position: %w", err)
 	}
-
+	if err := m.ctx.Err(); err != nil {
+		return err
+	}
 	log.Info("Starting from master position", log.Any("position", pos))
 
 	// 记录任务启动日志
@@ -191,11 +196,17 @@ func (m *Monitor) Start() error {
 			log.String("table_name", task.TableName))
 	}
 
+	m.running.Store(true)
 	return m.canal.RunFrom(pos)
 }
 
-// Stop 停止监控
+// Running 表示初始化完成并进入复制循环，不代表实时连接健康。
+func (m *Monitor) Running() bool { return m.running.Load() }
+
+// Stop 停止生产并中断队列等待。
 func (m *Monitor) Stop() {
+	m.cancel()
+	m.running.Store(false)
 	log.Info("Stopping MySQL monitor")
 
 	for _, task := range m.config.Tasks {
@@ -205,7 +216,6 @@ func (m *Monitor) Stop() {
 	if m.canal != nil {
 		m.canal.Close()
 	}
-	m.cancel()
 }
 
 // loadTableSchemas 加载表结构
@@ -248,7 +258,7 @@ func (m *Monitor) getTableSchema(db *sql.DB, tableName string) (*types.TableSche
 		log.String("quoted_table_name", quotedTableName),
 		log.String("query", query))
 
-	rows, err := db.Query(query)
+	rows, err := db.QueryContext(m.ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query table %s: %w", tableName, err)
 	}
@@ -272,6 +282,9 @@ func (m *Monitor) getTableSchema(db *sql.DB, tableName string) (*types.TableSche
 
 // OnRow 处理行变更事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnRow(e *canal.RowsEvent) error {
+	if e.Table.Schema != m.config.Database.Database {
+		return nil
+	}
 	eventTaskId := utils.GetEventTaskId(e.Table.Name, string(e.Action))
 	tasks, exists := m.eventTaskMap[eventTaskId]
 	if !exists {
@@ -322,20 +335,8 @@ func (m *Monitor) handleInsert(e *canal.RowsEvent, task *types.Task) error {
 			log.String("table", event.Table),
 			log.Any("primary_id", event.PrimaryID))
 
-		select {
-		case m.eventQueue <- event:
-			// 如果有事件回调函数，则调用它
-			if m.eventCallback != nil {
-				m.eventCallback()
-			}
-		case <-m.ctx.Done():
-			return m.ctx.Err()
-		case <-time.After(m.config.Monitor.EventQueueTimeout):
-			log.Error("Event queue timeout, event dropped",
-				log.String("task_id", task.TaskID),
-				log.String("event_type", string(event.Event)),
-				log.String("table", event.Table))
-			return fmt.Errorf("event queue timeout")
+		if err := m.enqueue(event); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -366,20 +367,8 @@ func (m *Monitor) handleUpdate(e *canal.RowsEvent, task *types.Task) error {
 			log.String("table", event.Table),
 			log.Any("primary_id", event.PrimaryID))
 
-		select {
-		case m.eventQueue <- event:
-			// 如果有事件回调函数，则调用它
-			if m.eventCallback != nil {
-				m.eventCallback()
-			}
-		case <-m.ctx.Done():
-			return m.ctx.Err()
-		case <-time.After(m.config.Monitor.EventQueueTimeout):
-			log.Error("Event queue timeout, event dropped",
-				log.String("task_id", task.TaskID),
-				log.String("event_type", string(event.Event)),
-				log.String("table", event.Table))
-			return fmt.Errorf("event queue timeout")
+		if err := m.enqueue(event); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -405,23 +394,30 @@ func (m *Monitor) handleDelete(e *canal.RowsEvent, task *types.Task) error {
 			log.String("table", event.Table),
 			log.Any("primary_id", event.PrimaryID))
 
-		select {
-		case m.eventQueue <- event:
-			// 如果有事件回调函数，则调用它
-			if m.eventCallback != nil {
-				m.eventCallback()
-			}
-		case <-m.ctx.Done():
-			return m.ctx.Err()
-		case <-time.After(m.config.Monitor.EventQueueTimeout):
-			log.Error("Event queue timeout, event dropped",
-				log.String("task_id", task.TaskID),
-				log.String("event_type", string(event.Event)),
-				log.String("table", event.Table))
-			return fmt.Errorf("event queue timeout")
+		if err := m.enqueue(event); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// enqueue 在拥塞时保持背压；超时时间仅控制告警频率，不丢弃事件。
+func (m *Monitor) enqueue(event *types.ChangeEvent) error {
+	ticker := time.NewTicker(m.config.Monitor.EventQueueTimeout)
+	defer ticker.Stop()
+	for {
+		select {
+		case m.eventQueue <- event:
+			if m.eventCallback != nil {
+				m.eventCallback()
+			}
+			return nil
+		case <-m.ctx.Done():
+			return m.ctx.Err()
+		case <-ticker.C:
+			log.Warn("Event queue is full; waiting for capacity", log.String("task_id", event.TaskID))
+		}
+	}
 }
 
 // buildRowData 构建行数据
@@ -445,6 +441,9 @@ func (m *Monitor) OnRotate(header *replication.EventHeader, rotateEvent *replica
 
 // OnTableChanged 处理表结构变更事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnTableChanged(header *replication.EventHeader, schema string, table string) error {
+	if schema != m.config.Database.Database {
+		return nil
+	}
 	log.Info("Table schema changed", log.String("schema", schema), log.String("table", table))
 
 	// 重新加载表结构
@@ -481,13 +480,10 @@ func (m *Monitor) OnRowsQueryEvent(e *replication.RowsQueryEvent) error {
 	return nil
 }
 
-// OnTableNotFound 处理行事件引用的表不存在的情况 - 实现canal.EventHandler接口
-// 当 binlog 行事件引用了一张找不到元数据的表（例如已被删除）时，canal 会调用此方法。
-// 这里仅记录告警并返回 nil，让 CDC 流水线继续运行，而不是因为单张表缺失而中断。
+// OnTableNotFound 对缺失表元数据告警并跳过，保持尽力投递语义。
 func (m *Monitor) OnTableNotFound(header *replication.EventHeader, e *replication.RowsEvent) error {
 	log.Warn("Rows event references a table that no longer exists, skipping",
-		log.String("schema", string(e.Table.Schema)),
-		log.String("table", string(e.Table.Table)))
+		log.String("schema", string(e.Table.Schema)), log.String("table", string(e.Table.Table)))
 	return nil
 }
 
@@ -496,12 +492,9 @@ func (m *Monitor) String() string {
 	return "pikachuMonitor"
 }
 
+// OnPosSynced 仅记录读取进度，不持久化或恢复位点。
 func (m *Monitor) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
-	// 记录位置同步信息，用于监控和调试
-	log.Debug("Position synced",
-		log.Any("position", pos),
-		log.Bool("force", force),
-		log.Any("gtid_set", set))
+	log.Debug("Position synced", log.Any("position", pos), log.Bool("force", force), log.Any("gtid_set", set))
 	return nil
 }
 
