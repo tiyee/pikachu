@@ -1,7 +1,6 @@
 package types
 
 import (
-	"database/sql"
 	"time"
 )
 
@@ -16,17 +15,11 @@ const (
 
 // Task 任务配置结构
 type Task struct {
-	TaskID              string      `yaml:"task_id"`
-	Name                string      `yaml:"name"`
-	TableName           string      `yaml:"table_name"`
-	Events              []EventType `yaml:"events"`
-	CallbackURL         string      `yaml:"callback_url"`
-	PrebuiltCallbackURL string      `yaml:"-"` // 预构建的完整回调URL，不序列化到YAML
-}
-type EventTask struct {
-	TableName string
-	Event     EventType
-	Tasks     []*Task
+	TaskID      string      `yaml:"task_id"`
+	Name        string      `yaml:"name"`
+	TableName   string      `yaml:"table_name"`
+	Events      []EventType `yaml:"events"`
+	CallbackURL string      `yaml:"callback_url"`
 }
 
 // LogLevel 日志级别类型
@@ -60,17 +53,17 @@ type DispatcherConfig struct {
 	MaxConnections  int           `yaml:"max_connections"`   // 最大并发连接数
 	MaxIdleConns    int           `yaml:"max_idle_conns"`    // 最大空闲连接数
 	IdleConnTimeout time.Duration `yaml:"idle_conn_timeout"` // 空闲连接超时
-	BatchSize       int           `yaml:"batch_size"`        // 批处理大小
-	BatchTimeout    time.Duration `yaml:"batch_timeout"`     // 批处理超时
+	BatchSize       int           `yaml:"batch_size"`        // 废弃兼容字段，仅接受旧默认值
+	BatchTimeout    time.Duration `yaml:"batch_timeout"`     // 废弃兼容字段，仅接受旧默认值
 }
 
 // MonitorConfig 监控器配置
 type MonitorConfig struct {
 	EventQueueSize    int           `yaml:"event_queue_size"`    // 事件队列大小
 	EventQueueTimeout time.Duration `yaml:"event_queue_timeout"` // 事件队列超时时间
-	BatchSize         int           `yaml:"batch_size"`          // 批处理大小
-	BatchTimeout      time.Duration `yaml:"batch_timeout"`       // 批处理超时
-	FlushInterval     time.Duration `yaml:"flush_interval"`      // 刷新间隔
+	BatchSize         int           `yaml:"batch_size"`          // 废弃兼容字段，仅接受旧默认值
+	BatchTimeout      time.Duration `yaml:"batch_timeout"`       // 废弃兼容字段，仅接受旧默认值
+	FlushInterval     time.Duration `yaml:"flush_interval"`      // 废弃兼容字段，仅接受旧默认值
 }
 
 // Config 配置文件结构
@@ -86,19 +79,25 @@ type Config struct {
 
 // LogConfig 日志配置
 type LogConfig struct {
-	Level  LogLevel `yaml:"level"`
-	Format string   `yaml:"format"` // text, json
+	Level      LogLevel `yaml:"level"`
+	Format     string   `yaml:"format"`      // text, json
+	Directory  string   `yaml:"directory"`   // JSON 日志目录
+	MaxSize    int      `yaml:"max_size"`    // 单个日志文件的最大 MiB
+	MaxBackups int      `yaml:"max_backups"` // 轮转备份数
+	MaxAge     int      `yaml:"max_age"`     // 备份保留天数
 }
 
 // DatabaseConfig 数据库配置
 type DatabaseConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
-	ServerID uint32 `yaml:"server_id"`
-	Charset  string `yaml:"charset"` // 数据库字符集，可选，默认为utf8mb4
+	Host           string        `yaml:"host"`
+	Port           int           `yaml:"port"`
+	User           string        `yaml:"user"`
+	Password       string        `yaml:"password"`
+	Database       string        `yaml:"database"`
+	ServerID       uint32        `yaml:"server_id"`
+	Charset        string        `yaml:"charset"`         // 数据库字符集，可选，默认为utf8mb4
+	ConnectTimeout time.Duration `yaml:"connect_timeout"` // 建立连接的超时
+	ReadTimeout    time.Duration `yaml:"read_timeout"`    // 数据库读写等待的超时
 }
 
 // ChangeEvent 数据变更事件
@@ -121,17 +120,4 @@ type WebhookPayload struct {
 	OldData   map[string]interface{} `json:"old_data,omitempty"`
 	NewData   map[string]interface{} `json:"new_data,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
-}
-
-// CallbackTask 回调任务
-type CallbackTask struct {
-	Event       *ChangeEvent
-	CallbackURL string
-	RetryCount  int
-	MaxRetries  int
-}
-
-// TableSchema 表结构信息
-type TableSchema struct {
-	Columns map[string]*sql.ColumnType
 }

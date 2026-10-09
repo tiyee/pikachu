@@ -2,9 +2,11 @@ package monitor
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,8 +14,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
-	_ "github.com/go-sql-driver/mysql"
-	"go.uber.org/zap"
 
 	"pikachu/internal/log"
 	"pikachu/internal/types"
@@ -27,14 +27,20 @@ type EventCallback func()
 type Monitor struct {
 	running       atomic.Bool
 	config        *types.Config
-	canal         *canal.Canal
+	canal         replicationClient
 	eventQueue    chan *types.ChangeEvent
-	tasksByTable  map[string][]*types.Task // 按表名分组的任务
 	eventTaskMap  map[string][]*types.Task // 按事件类型分组的任务
-	schemaCache   map[string]*types.TableSchema
 	ctx           context.Context
 	cancel        context.CancelFunc
 	eventCallback EventCallback
+	stopOnce      sync.Once
+}
+
+// replicationClient 便于隔离测试复制循环的生命周期。
+type replicationClient interface {
+	GetMasterPos() (mysql.Position, error)
+	RunFrom(mysql.Position) error
+	Close()
 }
 
 // GetPrimaryKey 获取主键值，支持复合主键
@@ -83,29 +89,23 @@ func GetPrimaryKey(table *schema.Table, newData, oldData map[string]interface{})
 }
 
 // New 创建新的监控器
-func New(config *types.Config, eventQueue chan *types.ChangeEvent, eventCallback EventCallback) (*Monitor, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+func New(parent context.Context, config *types.Config, eventQueue chan *types.ChangeEvent, eventCallback EventCallback) (*Monitor, error) {
+	ctx, cancel := context.WithCancel(parent)
 
 	monitor := &Monitor{
 		config:        config,
 		eventQueue:    eventQueue,
-		tasksByTable:  make(map[string][]*types.Task),
 		eventTaskMap:  make(map[string][]*types.Task),
-		schemaCache:   make(map[string]*types.TableSchema),
 		ctx:           ctx,
 		cancel:        cancel,
 		eventCallback: eventCallback,
 	}
 
 	// 建立任务映射 - 优化后的版本
-	tasksByTable := make(map[string][]*types.Task)
 	eventTaskMap := make(map[string][]*types.Task)
 
 	for i := range config.Tasks {
 		task := &config.Tasks[i]
-
-		// 按表名分组
-		tasksByTable[task.TableName] = append(tasksByTable[task.TableName], task)
 
 		// 按事件类型分组
 		for _, event := range task.Events {
@@ -114,17 +114,25 @@ func New(config *types.Config, eventQueue chan *types.ChangeEvent, eventCallback
 		}
 	}
 
-	monitor.tasksByTable = tasksByTable
 	monitor.eventTaskMap = eventTaskMap
+
+	// 直接验证实际 SELECT 能力，兼容生效角色与表级授权。
+	if err := monitor.validateTables(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("validate database access: %w", err)
+	}
 
 	// 初始化canal
 	cfg := canal.NewDefaultConfig()
-	cfg.Addr = fmt.Sprintf("%s:%d", config.Database.Host, config.Database.Port)
+	cfg.Addr = net.JoinHostPort(config.Database.Host, strconv.Itoa(config.Database.Port))
 	cfg.User = config.Database.User
 	cfg.Password = config.Database.Password
 	cfg.Charset = config.Database.Charset // 从配置文件读取charset
 	cfg.ServerID = config.Database.ServerID
 	cfg.Flavor = "mysql"
+	cfg.Dialer = databaseDialer(ctx, config.Database)
+	cfg.ReadTimeout = config.Database.ReadTimeout
+	cfg.HeartbeatPeriod = config.Database.ReadTimeout / 2
 	cfg.Dump.SkipMasterData = true
 	cfg.Dump.ExecutionPath = ""
 
@@ -142,12 +150,21 @@ func New(config *types.Config, eventQueue chan *types.ChangeEvent, eventCallback
 
 	c, err := canal.NewCanal(cfg)
 	if err != nil {
+		contextErr := ctx.Err()
 		cancel()
+		if contextErr != nil {
+			return nil, contextErr
+		}
 		return nil, fmt.Errorf("failed to create canal: %w", err)
 	}
 
+	if err := c.CheckBinlogRowImage("FULL"); err != nil {
+		cancel()
+		c.Close()
+		return nil, fmt.Errorf("binlog_row_image must be FULL: %w", err)
+	}
 	monitor.canal = c
-	monitor.canal.SetEventHandler(monitor)
+	c.SetEventHandler(monitor)
 
 	return monitor, nil
 }
@@ -173,14 +190,16 @@ func (m *Monitor) Start() error {
 	defer m.running.Store(false)
 	log.Info("Starting MySQL monitor")
 
-	// 加载表结构
-	if err := m.loadTableSchemas(); err != nil {
-		return fmt.Errorf("failed to load table schemas: %w", err)
+	if err := m.ctx.Err(); err != nil {
+		return err
 	}
 
 	// 保持尽力投递语义，每次启动从当前 master position 开始。
 	pos, err := m.canal.GetMasterPos()
 	if err != nil {
+		if m.ctx.Err() != nil {
+			return m.ctx.Err()
+		}
 		return fmt.Errorf("failed to get master position: %w", err)
 	}
 	if err := m.ctx.Err(); err != nil {
@@ -197,7 +216,11 @@ func (m *Monitor) Start() error {
 	}
 
 	m.running.Store(true)
-	return m.canal.RunFrom(pos)
+	err = m.canal.RunFrom(pos)
+	if m.ctx.Err() != nil {
+		return m.ctx.Err()
+	}
+	return err
 }
 
 // Running 表示初始化完成并进入复制循环，不代表实时连接健康。
@@ -205,83 +228,22 @@ func (m *Monitor) Running() bool { return m.running.Load() }
 
 // Stop 停止生产并中断队列等待。
 func (m *Monitor) Stop() {
-	m.cancel()
-	m.running.Store(false)
-	log.Info("Stopping MySQL monitor")
-
-	for _, task := range m.config.Tasks {
-		log.Info("Task stopped", log.String("task_id", task.TaskID))
-	}
-
-	if m.canal != nil {
-		m.canal.Close()
-	}
-}
-
-// loadTableSchemas 加载表结构
-func (m *Monitor) loadTableSchemas() error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s",
-		m.config.Database.User, m.config.Database.Password,
-		m.config.Database.Host, m.config.Database.Port,
-		m.config.Database.Database, m.config.Database.Charset)
-
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(time.Hour)
-
-	for _, task := range m.config.Tasks {
-		schema_, err := m.getTableSchema(db, task.TableName)
-		if err != nil {
-			return fmt.Errorf("failed to load schema for table %s: %w", task.TableName, err)
+	m.stopOnce.Do(func() {
+		m.cancel()
+		m.running.Store(false)
+		log.Info("Stopping MySQL monitor")
+		if m.canal != nil {
+			m.canal.Close()
 		}
-		m.schemaCache[task.TableName] = schema_
-	}
-
-	return nil
-}
-
-// getTableSchema 获取表结构
-func (m *Monitor) getTableSchema(db *sql.DB, tableName string) (*types.TableSchema, error) {
-	// 使用简化的引用函数处理表名，确保被反引号包围
-	quotedTableName := utils.EnsureQuoted(tableName)
-	query := fmt.Sprintf("SELECT * FROM %s LIMIT 0", quotedTableName)
-
-	log.Debug("Loading table schema",
-		log.String("table_name", tableName),
-		log.String("quoted_table_name", quotedTableName),
-		log.String("query", query))
-
-	rows, err := db.QueryContext(m.ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query table %s: %w", tableName, err)
-	}
-	defer rows.Close()
-
-	columnTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get column types for table %s: %w", tableName, err)
-	}
-
-	schema_ := &types.TableSchema{
-		Columns: make(map[string]*sql.ColumnType),
-	}
-
-	for _, ct := range columnTypes {
-		schema_.Columns[ct.Name()] = ct
-	}
-
-	return schema_, nil
+	})
 }
 
 // OnRow 处理行变更事件 - 实现canal.EventHandler接口
 func (m *Monitor) OnRow(e *canal.RowsEvent) error {
+	if e == nil || e.Table == nil {
+		return fmt.Errorf("row event has no table metadata")
+	}
+
 	if e.Table.Schema != m.config.Database.Database {
 		return nil
 	}
@@ -289,6 +251,15 @@ func (m *Monitor) OnRow(e *canal.RowsEvent) error {
 	tasks, exists := m.eventTaskMap[eventTaskId]
 	if !exists {
 		return nil
+	}
+
+	if e.Action == canal.UpdateAction && len(e.Rows)%2 != 0 {
+		return fmt.Errorf("update event must contain paired row images")
+	}
+	for _, row := range e.Rows {
+		if len(row) != len(e.Table.Columns) {
+			return fmt.Errorf("row image column count does not match table metadata")
+		}
 	}
 
 	switch e.Action {
@@ -446,14 +417,7 @@ func (m *Monitor) OnTableChanged(header *replication.EventHeader, schema string,
 	}
 	log.Info("Table schema changed", log.String("schema", schema), log.String("table", table))
 
-	// 重新加载表结构
-	if tasks, exists := m.tasksByTable[table]; exists && len(tasks) > 0 {
-		if err := m.loadTableSchemas(); err != nil {
-			log.Error("Failed to reload table schema",
-				log.String("task_id", tasks[0].TaskID),
-				zap.Error(err))
-		}
-	}
+	// canal 已清理表元数据缓存，下一个行事件按需获取新结构。
 
 	return nil
 }
@@ -495,72 +459,5 @@ func (m *Monitor) String() string {
 // OnPosSynced 仅记录读取进度，不持久化或恢复位点。
 func (m *Monitor) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	log.Debug("Position synced", log.Any("position", pos), log.Bool("force", force), log.Any("gtid_set", set))
-	return nil
-}
-
-// CheckDatabasePermissions 检查数据库权限
-func CheckDatabasePermissions(config *types.DatabaseConfig) error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s",
-		config.User, config.Password, config.Host, config.Port, config.Database, config.Charset)
-
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
-	}
-	defer db.Close()
-
-	// 检查连接
-	if err := db.Ping(); err != nil {
-		return fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	// 检查权限 - 最小化权限集
-	// 仅包含应用程序实际需要的权限
-	requiredPrivileges := []string{
-		"SELECT",             // 用于获取表结构信息
-		"REPLICATION SLAVE",  // 用于连接二进制日志并接收变更事件
-		"REPLICATION CLIENT", // 用于获取主服务器的位置信息
-	}
-
-	rows, err := db.Query("SHOW GRANTS FOR CURRENT_USER()")
-	if err != nil {
-		return fmt.Errorf("failed to check privileges: %w", err)
-	}
-	defer rows.Close()
-
-	var grants []string
-	for rows.Next() {
-		var grant string
-		if err := rows.Scan(&grant); err != nil {
-			continue
-		}
-		grants = append(grants, grant)
-	}
-
-	// 简化权限检查 - 在实际环境中需要更精确的解析
-	hasAllPrivileges := false
-	for _, grant := range grants {
-		if utils.Contains(grant, "ALL PRIVILEGES") || utils.Contains(grant, "GRANT ALL") {
-			hasAllPrivileges = true
-			break
-		}
-	}
-
-	if !hasAllPrivileges {
-		// 检查是否有必要的权限
-		for _, privilege := range requiredPrivileges {
-			hasPrivilege := false
-			for _, grant := range grants {
-				if utils.Contains(grant, privilege) {
-					hasPrivilege = true
-					break
-				}
-			}
-			if !hasPrivilege {
-				return fmt.Errorf("missing required privilege: %s", privilege)
-			}
-		}
-	}
-
 	return nil
 }

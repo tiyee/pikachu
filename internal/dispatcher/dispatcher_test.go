@@ -214,3 +214,28 @@ func TestShutdownCancelsInFlightRequest(t *testing.T) {
 		t.Fatal("in-flight payload was retained")
 	}
 }
+
+func TestRedirectsCannotCountAsSuccessfulDelivery(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var targetCalls int
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/start" {
+					http.Redirect(w, r, "/target", status)
+					return
+				}
+				targetCalls++
+				w.WriteHeader(204)
+			}))
+			defer s.Close()
+			d, q, m := startDispatcher(t, s.URL+"/start", 1, 1)
+			q <- event("redirect")
+			if err := stopDispatcher(t, d, q); err != nil {
+				t.Fatal(err)
+			}
+			if targetCalls != 0 || m.GetEventsSucceeded() != 0 || m.GetEventsFailed() != 1 || m.GetRetries() != 1 {
+				t.Fatal("redirect delivered or counted as success")
+			}
+		})
+	}
+}

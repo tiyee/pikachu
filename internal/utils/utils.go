@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -12,19 +13,14 @@ func Contains(s, substr string) bool {
 }
 
 // EnsureQuoted 确保标识符被反引号包围
-// 如果已经有反引号就不处理，否则添加反引号
+// 输入为原始标识符，内部反引号双写转义
 func EnsureQuoted(identifier string) string {
 	if identifier == "" {
 		return identifier
 	}
 
-	// 检查是否已经有反引号包围
-	if strings.HasPrefix(identifier, "`") && strings.HasSuffix(identifier, "`") {
-		return identifier
-	}
-
-	// 添加反引号
-	return "`" + identifier + "`"
+	// 标识符中的反引号必须双写，保持单个标识符语义。
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
 
 // GetEventTaskId 生成事件任务ID
@@ -55,7 +51,7 @@ func GetUserAgent() string {
 // BuildCallbackURL 构建完整的回调URL
 func BuildCallbackURL(callbackHost, callbackURL string) string {
 	// 如果callbackURL已经是绝对URL，直接返回
-	if strings.HasPrefix(callbackURL, "http://") || strings.HasPrefix(callbackURL, "https://") {
+	if parsed, err := url.Parse(callbackURL); err == nil && parsed.IsAbs() {
 		return callbackURL
 	}
 

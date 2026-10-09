@@ -1,6 +1,8 @@
 # 测试环境配置示例
 
 database:
+  connect_timeout: 10s # 建立数据库连接的超时
+  read_timeout: 30s # 数据库读写等待超时，复制心跳周期为其一半
   host: "localhost"
   port: 3306
   user: "root"
@@ -9,6 +11,10 @@ database:
   server_id: 100
 
 log:
+  directory: "logs" # JSON 日志目录
+  max_size: 100 # 每个日志文件的最大 MiB
+  max_backups: 5 # 保留备份数
+  max_age: 7 # 备份保留天数
   level: "debug"  # 测试环境使用debug级别便于调试
   format: "text"  # 测试环境使用text格式便于阅读
 

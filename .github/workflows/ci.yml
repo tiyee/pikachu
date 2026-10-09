@@ -1,0 +1,34 @@
+name: Go checks
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l main.go main_test.go internal cmd)
+          if [ -n "$files" ]; then printf '%s\n' "$files"; exit 1; fi
+      - name: Verify modules
+        run: go mod verify
+      - name: Build
+        run: go build -mod=readonly ./...
+      - name: Vet
+        run: go vet -mod=readonly ./...
+      - name: Tests and race detector
+        run: go test -mod=readonly -race -coverprofile=coverage.out ./...
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out

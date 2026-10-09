@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-race test-coverage test-benchmark build clean lint help
+.PHONY: all test test-unit test-race test-coverage test-benchmark test-all build clean lint help fmt check-format vet verify ci deps dev-checks prod-checks watch
 
 # Default target
 all: build test
@@ -100,5 +100,11 @@ help:
 	@echo "  help           - Show this help message"
 
 # CI/CD pipeline target
-ci: deps fmt vet lint test-race test-coverage
+ci: check-format verify build vet test-race test-coverage
 	@echo "✅ CI pipeline completed successfully!"
+# 验证格式和依赖，不修改源码或模块文件。
+check-format:
+	@files=$$(gofmt -l main.go main_test.go internal cmd); if [ -n "$$files" ]; then printf '%s\n' "$$files"; exit 1; fi
+
+verify:
+	go mod verify

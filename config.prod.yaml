@@ -1,6 +1,8 @@
 # 生产环境配置示例
 
 database:
+  connect_timeout: 10s # 建立数据库连接的超时
+  read_timeout: 30s # 数据库读写等待超时，复制心跳周期为其一半
   host: "prod-db.example.com"
   port: 3306
   user: "pikachu_prod"
@@ -9,6 +11,10 @@ database:
   server_id: 1001
 
 log:
+  directory: "logs" # JSON 日志目录
+  max_size: 100 # 每个日志文件的最大 MiB
+  max_backups: 5 # 保留备份数
+  max_age: 7 # 备份保留天数
   level: "warn"  # 生产环境使用warn级别
   format: "json" # 生产环境使用json格式便于日志收集
 

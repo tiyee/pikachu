@@ -1,15 +1,20 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"pikachu/internal/types"
+	"pikachu/internal/utils"
 )
 
 // LoadConfig 加载YAML配置文件
@@ -21,18 +26,20 @@ func LoadConfig(filename, tasksFile string) (*types.Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var config types.Config
-	err = yaml.Unmarshal(data, &config)
+	config := types.Config{Dispatcher: types.DispatcherConfig{MaxRetries: 3}}
+	err = decodeYAML(data, &config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// 尝试加载tasks配置文件
+	if tasksFile == "" {
+		tasksFile = "tasks.yaml"
+	}
+	// 仅文件不存在时兼容内联任务，解析和权限错误必须返回。
 	tasks, err := LoadTasks(tasksFile)
 	if err != nil {
-		// 如果tasks.yaml不存在，尝试从原配置文件中加载tasks（向后兼容）
-		if len(config.Tasks) == 0 {
-			return nil, fmt.Errorf("no tasks configured and failed to load tasks.yaml: %w", err)
+		if !errors.Is(err, os.ErrNotExist) || len(config.Tasks) == 0 {
+			return nil, fmt.Errorf("failed to load tasks file %q: %w", tasksFile, err)
 		}
 		// 如果原配置文件中有tasks，则使用原配置（向后兼容）
 	} else {
@@ -54,7 +61,7 @@ func LoadTasks(filename string) ([]types.Task, error) {
 		Tasks []types.Task `yaml:"tasks"`
 	}
 
-	err = yaml.Unmarshal(data, &tasksConfig)
+	err = decodeYAML(data, &tasksConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
 	}
@@ -62,8 +69,28 @@ func LoadTasks(filename string) ([]types.Task, error) {
 	return tasksConfig.Tasks, nil
 }
 
+// decodeYAML 拒绝未知字段和多个文档，避免配置拼写错误被忽略。
+func decodeYAML(data []byte, target interface{}) error {
+	d := yaml.NewDecoder(bytes.NewReader(data))
+	d.KnownFields(true)
+	if err := d.Decode(target); err != nil {
+		return err
+	}
+	var extra interface{}
+	if err := d.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("multiple YAML documents are not supported")
+	}
+	return nil
+}
+
 // ValidateConfig 验证配置文件
 func ValidateConfig(config *types.Config) error {
+	if config == nil {
+		return fmt.Errorf("config cannot be nil")
+	}
 	if len(config.Tasks) == 0 {
 		return fmt.Errorf("no tasks configured")
 	}
@@ -75,6 +102,15 @@ func ValidateConfig(config *types.Config) error {
 
 	// 验证任务配置
 	ids := make(map[string]int)
+	if config.CallbackHost != "" {
+		if err := validateURL(config.CallbackHost); err != nil {
+			return fmt.Errorf("invalid callback_host: %w", err)
+		}
+		u, _ := url.Parse(config.CallbackHost)
+		if u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("callback_host cannot contain query or fragment")
+		}
+	}
 	for i, task := range config.Tasks {
 		if previous, exists := ids[task.TaskID]; exists {
 			return fmt.Errorf("task[%d]: duplicate task_id %q (first at task[%d])", i, task.TaskID, previous)
@@ -83,14 +119,57 @@ func ValidateConfig(config *types.Config) error {
 		if err := validateTaskConfig(&task, i); err != nil {
 			return err
 		}
+		if err := validateURL(utils.BuildCallbackURL(config.CallbackHost, task.CallbackURL)); err != nil {
+			return fmt.Errorf("task[%d]: invalid final callback URL (relative paths require callback_host): %w", i, err)
+		}
+		seen := make(map[types.EventType]bool)
+		events := make([]types.EventType, 0, len(task.Events))
+		for _, event := range task.Events {
+			if !seen[event] {
+				seen[event] = true
+				events = append(events, event)
+			}
+		}
+		config.Tasks[i].Events = events
 	}
 
 	if config.Dispatcher.ShutdownTimeout < 0 {
 		return fmt.Errorf("shutdown_timeout cannot be negative")
 	}
+	if config.Dispatcher.MaxRetries < 0 {
+		return fmt.Errorf("max_retries cannot be negative")
+	}
+	if err := validateLegacyBatch(config); err != nil {
+		return err
+	}
+	if err := validateNonnegative(config); err != nil {
+		return err
+	}
 
 	// 设置默认值
 	setDefaultValues(config)
+	if config.Log.Format != "text" && config.Log.Format != "json" {
+		return fmt.Errorf("log format must be text or json")
+	}
+	switch config.Log.Level {
+	case types.LogLevelDebug, types.LogLevelInfo, types.LogLevelWarn, types.LogLevelError, types.LogLevelFatal, types.LogLevelPanic:
+	default:
+		return fmt.Errorf("invalid log level %q", config.Log.Level)
+	}
+	if config.Server.Enabled {
+		if config.Server.Port == 0 {
+			config.Server.Port = 8080
+		}
+		if config.Server.Port < 1 || config.Server.Port > 65535 {
+			return fmt.Errorf("server port must be between 1 and 65535")
+		}
+		if config.Server.Path == "" {
+			config.Server.Path = "/health"
+		}
+		if !strings.HasPrefix(config.Server.Path, "/") || config.Server.Path == "/metrics-json" || strings.ContainsAny(config.Server.Path, " {}\t\r\n?#") {
+			return fmt.Errorf("invalid health path %q", config.Server.Path)
+		}
+	}
 
 	// 验证分发器配置的逻辑约束
 	if err := validateDispatcherConstraints(&config.Dispatcher); err != nil {
@@ -164,6 +243,15 @@ func validateURL(urlStr string) error {
 	if parsedURL.Host == "" {
 		return fmt.Errorf("URL host cannot be empty")
 	}
+	if port := parsedURL.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return fmt.Errorf("URL port must be between 1 and 65535")
+		}
+	}
+	if parsedURL.Hostname() == "" || parsedURL.User != nil || parsedURL.Fragment != "" {
+		return fmt.Errorf("URL must have a hostname and cannot contain userinfo or fragment")
+	}
 
 	return nil
 }
@@ -185,7 +273,7 @@ func validateCallbackURL(urlStr string) error {
 		}
 	} else {
 		// 如果是相对路径，需要以/开头
-		if !strings.HasPrefix(urlStr, "/") {
+		if !strings.HasPrefix(urlStr, "/") || parsedURL.Host != "" {
 			return fmt.Errorf("relative callback URL must start with '/', got: %s", urlStr)
 		}
 	}
@@ -208,9 +296,6 @@ func setDefaultValues(config *types.Config) {
 	if config.Dispatcher.Timeout <= 0 {
 		config.Dispatcher.Timeout = 30 * time.Second
 	}
-	if config.Dispatcher.MaxRetries <= 0 {
-		config.Dispatcher.MaxRetries = 3
-	}
 	if config.Dispatcher.RetryBaseDelay <= 0 {
 		config.Dispatcher.RetryBaseDelay = 5 * time.Second // 减少基础延迟以加快恢复
 	}
@@ -226,12 +311,6 @@ func setDefaultValues(config *types.Config) {
 	if config.Dispatcher.IdleConnTimeout <= 0 {
 		config.Dispatcher.IdleConnTimeout = 90 * time.Second // 空闲连接超时
 	}
-	if config.Dispatcher.BatchSize <= 0 {
-		config.Dispatcher.BatchSize = 1 // 默认不批处理，保持实时性
-	}
-	if config.Dispatcher.BatchTimeout <= 0 {
-		config.Dispatcher.BatchTimeout = 100 * time.Millisecond // 批处理超时
-	}
 
 	// 设置监控器默认值
 	if config.Monitor.EventQueueSize <= 0 {
@@ -239,15 +318,6 @@ func setDefaultValues(config *types.Config) {
 	}
 	if config.Monitor.EventQueueTimeout <= 0 {
 		config.Monitor.EventQueueTimeout = 2 * time.Second // 减少超时时间以加快响应
-	}
-	if config.Monitor.BatchSize <= 0 {
-		config.Monitor.BatchSize = 1 // 默认不批处理
-	}
-	if config.Monitor.BatchTimeout <= 0 {
-		config.Monitor.BatchTimeout = 50 * time.Millisecond
-	}
-	if config.Monitor.FlushInterval <= 0 {
-		config.Monitor.FlushInterval = 1 * time.Second // 刷新间隔
 	}
 
 	// 设置日志默认值
@@ -261,6 +331,24 @@ func setDefaultValues(config *types.Config) {
 	// 设置数据库默认charset
 	if config.Database.Charset == "" {
 		config.Database.Charset = "utf8mb4"
+	}
+	if config.Database.ConnectTimeout == 0 {
+		config.Database.ConnectTimeout = 10 * time.Second
+	}
+	if config.Database.ReadTimeout == 0 {
+		config.Database.ReadTimeout = 30 * time.Second
+	}
+	if config.Log.Directory == "" {
+		config.Log.Directory = "logs"
+	}
+	if config.Log.MaxSize == 0 {
+		config.Log.MaxSize = 100
+	}
+	if config.Log.MaxBackups == 0 {
+		config.Log.MaxBackups = 5
+	}
+	if config.Log.MaxAge == 0 {
+		config.Log.MaxAge = 7
 	}
 }
 
@@ -291,14 +379,26 @@ func validateDispatcherConstraints(config *types.DispatcherConfig) error {
 		return fmt.Errorf("max_idle_conns (%d) cannot be greater than max_connections (%d)", config.MaxIdleConns, config.MaxConnections)
 	}
 
-	// 批处理大小验证
-	if config.BatchSize < 1 {
-		return fmt.Errorf("batch_size (%d) must be at least 1", config.BatchSize)
-	}
+	return nil
+}
 
-	if config.BatchSize > 1000 {
-		return fmt.Errorf("batch_size (%d) is too large, maximum recommended is 1000", config.BatchSize)
+// validateLegacyBatch 仅接受旧示例的兼容值，拒绝承诺尚未实现的批处理行为。
+func validateLegacyBatch(c *types.Config) error {
+	if (c.Dispatcher.BatchSize != 0 && c.Dispatcher.BatchSize != 1) || (c.Dispatcher.BatchTimeout != 0 && c.Dispatcher.BatchTimeout != 100*time.Millisecond) || (c.Monitor.BatchSize != 0 && c.Monitor.BatchSize != 1) || (c.Monitor.BatchTimeout != 0 && c.Monitor.BatchTimeout != 50*time.Millisecond) || (c.Monitor.FlushInterval != 0 && c.Monitor.FlushInterval != time.Second) {
+		return fmt.Errorf("batch_size, batch_timeout and flush_interval are deprecated; batching is not supported")
 	}
+	return nil
+}
 
+// validateNonnegative 显式负值不能被默认值静默覆盖。
+func validateNonnegative(c *types.Config) error {
+	values := map[string]int64{
+		"worker_count": int64(c.Dispatcher.WorkerCount), "queue_size": int64(c.Dispatcher.QueueSize), "timeout": int64(c.Dispatcher.Timeout), "retry_base_delay": int64(c.Dispatcher.RetryBaseDelay), "retry_max_delay": int64(c.Dispatcher.RetryMaxDelay), "max_connections": int64(c.Dispatcher.MaxConnections), "max_idle_conns": int64(c.Dispatcher.MaxIdleConns), "idle_conn_timeout": int64(c.Dispatcher.IdleConnTimeout), "event_queue_size": int64(c.Monitor.EventQueueSize), "event_queue_timeout": int64(c.Monitor.EventQueueTimeout), "database.connect_timeout": int64(c.Database.ConnectTimeout), "database.read_timeout": int64(c.Database.ReadTimeout), "log.max_size": int64(c.Log.MaxSize), "log.max_backups": int64(c.Log.MaxBackups), "log.max_age": int64(c.Log.MaxAge),
+	}
+	for name, value := range values {
+		if value < 0 {
+			return fmt.Errorf("%s cannot be negative", name)
+		}
+	}
 	return nil
 }

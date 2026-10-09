@@ -38,8 +38,8 @@ func (s *healthState) lastEventTime() time.Time {
 }
 
 func main() {
-	configFile := flag.String("config", "config.yaml", "配置文件路径")
-	tasksFile := flag.String("tasks", "tasks.yaml", "任务配置文件路径")
+	configFile := flag.String("config", envPath("CONFIG_PATH", "config.yaml"), "配置文件路径")
+	tasksFile := flag.String("tasks", envPath("TASKS_PATH", "tasks.yaml"), "任务配置文件路径")
 	showVersion := flag.Bool("version", false, "显示版本信息")
 	flag.Parse()
 	if *showVersion {
@@ -49,9 +49,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, *configFile, *tasksFile); err != nil {
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// envPath 命令行未指定路径时使用环境变量，最后回退到工作目录的默认文件。
+func envPath(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func run(ctx context.Context, configFile, tasksFile string) error {
@@ -66,13 +77,10 @@ func run(ctx context.Context, configFile, tasksFile string) error {
 		return err
 	}
 	defer log.Close()
-	if err = monitor.CheckDatabasePermissions(&cfg.Database); err != nil {
-		return err
-	}
 	queue := make(chan *types.ChangeEvent, cfg.Monitor.EventQueueSize)
 	collector := metrics.NewMetrics()
 	state := &healthState{}
-	mon, err := monitor.New(cfg, queue, state.eventReceived)
+	mon, err := monitor.New(ctx, cfg, queue, state.eventReceived)
 	if err != nil {
 		return err
 	}

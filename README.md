@@ -1,1098 +1,179 @@
-# 🚀 pikachu - MySQL 变更监控工具
+# Pikachu
 
-<p align="center">
-  <strong>一个高效、可靠的 MySQL 数据库变更捕获(CDC)工具</strong><br>
-  <sub>实时监控数据库变更，支持高并发 webhook 分发</sub>
-</p>
+Go 编写的 MySQL CDC 工具：读取 binlog 行变更，通过固定数量的 worker 将 JSON 发送到 webhook。当前应用版本为 1.1.0，源码构建需要 Go 1.27；CI 使用 Go 1.27.1。
 
-<p align="center">
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat&logo=go" alt="Go Version">
-  </a>
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/MySQL-5.6+-4479A1?style=flat&logo=mysql" alt="MySQL Version">
-  </a>
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  </a>
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/Docker-Ready-blue?style=flat&logo=docker" alt="Docker">
-  </a>
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/Build-Passing-brightgreen?style=flat&logo=github-actions" alt="Build Status">
-  </a>
-  <a href="https://github.com/tiyee/pikachu">
-    <img src="https://img.shields.io/badge/Coverage-85%25-brightgreen?style=flat" alt="Test Coverage">
-  </a>
-</p>
+## 投递边界
 
-pikachu 是一个基于 Go 语言开发的高效 MySQL 数据库变更捕获(CDC)工具。它通过解析 MySQL 的 binlog 日志来实时捕获数据库表的变更事件（插入、更新、删除），并将这些变更通过 webhook 的方式发送到指定的回调地址。
+保持尽力投递，不保存或恢复位点，不做初始全量快照。每次启动从当前 master position 开始，停机及异常退出期间的事件不会补发。没有至少一次或恰好一次保证，接收端需处理丢失、重复与乱序。
 
-## 投递与关闭语义
+Monitor 输出有界队列 → Dispatcher 共享有界队列 → 固定 worker。队列满时等待空位形成背压，`monitor.event_queue_timeout` 只控制拥塞告警间隔。每个 worker 独占一次变更及其 JSON，重试复用当前事件的字节，任务结束即释放；等待重试也占用 worker。
 
-本项目保持尽力投递，不保存或恢复 binlog 位点，不保证百分百不丢。每次启动从当前 master position 开始，停机期间及异常退出前未完成的事件不会补发；没有至少一次或恰好一次保证，接收端仍应处理重复与乱序。
+HTTP 2xx 表示成功。所有重定向均不跟随，3xx 和其他失败响应按配置重试，避免 POST 被转换成 GET 或将数据库数据发送到未配置的目标。单次投递耗尽重试后计入失败及丢弃，继续处理其他事件。
 
-队列满时等待空位，不再因短时拥塞主动丢弃。每次变更独立序列化，重试由固定数量的 worker 执行，不与其他变更共享 JSON。回调耗尽重试后记录失败及丢弃计数，继续处理其他事件。
+收到 SIGINT / SIGTERM 后先停止 Monitor，等待生产者退出，再关闭队列并限时排空 Dispatcher。默认排空期限为 30s，到期取消剩余 HTTP 和重试。该期限只覆盖 Dispatcher；数据库读写现在响应取消，也有独立超时。Compose 的停止宽限期为 45s，调整排空期限时应同步留出组件停止余量。
 
-`dispatcher.shutdown_timeout` 默认 30s：先停止 Monitor，再排空已接收的回调；到期取消剩余 HTTP 和重试，未完成事件计入失败及丢弃，不持久保存。该期限只覆盖分发器排空阶段，数据库组件停止需额外留出时间；Compose 提供 45s 停止宽限期。`monitor.event_queue_timeout` 现在只控制队列拥塞的告警间隔，触发后继续等待。
+性能取决于行大小、网络与回调延迟。仓库没有可复用的吞吐量或延迟基准，因此不承诺固定性能指标、成功率或内存占用。
 
-## ⚡ 性能指标
+## 快速开始
 
-| 指标 | 数值 | 说明 |
-|------|------|------|
-| **事件处理延迟** | < 10ms | P99 延迟，从 binlog 到 webhook 发送 |
-| **吞吐量** | 10,000+ events/sec | 单实例处理能力 |
-| **Webhook 成功率** | > 99.9% | 包含重试机制的整体成功率 |
-| **内存占用** | < 100MB | 基础运行内存（不含事件队列） |
-| **CPU 使用率** | < 5% | 正常负载下的 CPU 占用 |
-| **并发处理** | 50+ workers | 可配置的 webhook 并发数 |
-
-## ✨ 核心特性
-
-### 🎯 监控能力
-- **实时监控**: 毫秒级延迟的数据库变更捕获
-- **全事件支持**: 支持 INSERT、UPDATE、DELETE 事件监控
-- **多表监控**: 同时监控多个数据表，独立配置回调
-- **精确过滤**: 基于表名和事件类型的精确过滤
-
-### 🚀 性能与可靠性
-- **高并发处理**: 基于协程池的并发 webhook 分发
-- **智能重试**: 指数退避重试，耗尽重试后记录失败并继续处理
-- **性能优化**: URL 预构建，避免运行时重复计算
-- **内存效率**: 事件队列缓冲，支持流量突发处理
-
-### 🛠️ 易用性与兼容性
-- **配置灵活**: YAML 配置文件，支持多环境部署
-- **MySQL 兼容**: 自动处理 MySQL 关键字表名
-- **健康检查**: 内置 HTTP 监控端点
-- **优雅关闭**: 停止生产后限时排空；超时取消并记录未完成事件
-
-### 🐳 部署友好
-- **Docker 支持**: 提供 Docker 和 Docker Compose 部署方案
-- **结构化日志**: 支持 JSON 格式日志，便于日志收集
-- **轻量级**: 单一二进制文件部署，无外部依赖
-
-## 📋 系统要求
-
-### 最低要求
-- **Go**: 1.27+ (如果从源码编译)
-- **MySQL**: 5.6+ 或 MariaDB 10.0+（需要开启二进制日志）
-- **内存**: 最少 128MB，推荐 512MB+
-- **磁盘**: 最少 50MB 可用空间
-
-### 推荐配置
-- **CPU**: 2+ 核心（高并发场景）
-- **内存**: 1GB+ （生产环境）
-- **网络**: 稳定的数据库连接和 webhook 回调网络
-
-## 🏗️ 架构设计
-
-```mermaid
-graph TB
-    A[MySQL Database] -->|Binlog Events| B[Monitor Component]
-    B --> C[Event Queue<br/>Size: 10,000 / Backpressure]
-    C --> D[Dispatcher Worker Pool<br/>Workers: 20-50]
-    D --> E[Webhook Callbacks<br/>Retry Logic]
-
-    B --> F[Schema Cache<br/>Table Metadata]
-    D --> G[URL Pre-builder<br/>Performance Opt]
-
-    subgraph "pikachu Core Components"
-        B
-        C
-        D
-        F
-        G
-    end
-
-    subgraph "Monitoring & Health"
-        H[HTTP Server<br/>Port: 8080]
-        I[Metrics Collector<br/>Performance Data]
-        J[Health Checks<br/>System Status]
-    end
-
-    subgraph "External Services"
-        K[Config Files<br/>config.yaml<br/>tasks.yaml]
-        L[Target APIs<br/>Webhook URLs]
-        M[Monitoring Systems<br/>Prometheus etc.]
-    end
-
-    K --> B
-    K --> C
-    K --> D
-    B --> H
-    B --> I
-    D --> J
-    E --> L
-    I --> M
-    H --> M
-```
-
-### 🔄 事件处理流程
-
-1. **Binlog 监听**: Monitor 组件通过 canal 库监听 MySQL binlog 事件
-2. **事件过滤**: 根据任务配置过滤表名和事件类型
-3. **队列缓冲**: 事件进入高内存队列，支持流量突发
-4. **并发分发**: 共享有界队列与 Worker Pool 并发处理 webhook 请求
-5. **重试机制**: 失败请求采用指数退避重试策略
-6. **状态监控**: 实时收集和暴露系统指标
-
-### 🎯 设计亮点
-
-- **事件驱动架构**: 非阻塞式事件处理，支持高并发
-- **任务生命周期**: 每个 worker 独占一次变更及其 JSON，重试结束即释放
-- **智能重试**: 指数退避算法，避免对下游服务造成压力
-- **URL 预构建**: 启动时预构建所有回调 URL，提升运行时性能
-- **MySQL 关键字处理**: 自动识别和转义 MySQL 保留字表名
-
-## 🚀 快速开始
-
-### 📦 安装方式
-
-#### 方式一：从源码编译
-
-```bash
-# 克隆仓库
-git clone https://github.com/tiyee/pikachu.git
-cd pikachu
-
-# 编译应用
-go build -o pikachu .
-
-# 或使用 Makefile（推荐）
-make build
-```
-
-#### 方式二：预编译二进制文件
-
-```bash
-# 下载对应平台的二进制文件
-wget https://github.com/tiyee/pikachu/releases/latest/download/pikachu-linux-amd64.tar.gz
-
-# 解压
-tar -xzf pikachu-linux-amd64.tar.gz
-
-# 赋予执行权限
-chmod +x pikachu
-```
-
-#### 方式三：使用 Docker
-
-```bash
-# 拉取镜像
-docker pull pikachu:latest
-
-# 或使用 Docker Compose（推荐）
-docker-compose up -d
-```
-
-#### ⚙️ 配置文件
-
-1. **主配置文件** (`config.yaml`)：
-
-```yaml
-# 数据库配置
-database:
-  host: "localhost"
-  port: 3306
-  user: "root"
-  password: "password"
-  database: "test_db"
-  server_id: 100  # 唯一标识，避免与主从复制冲突
-  charset: "utf8mb4"  # 可选，默认 utf8mb4
-
-# 日志配置
-log:
-  level: "info"  # debug, info, warn, error, fatal, panic
-  format: "text" # text, json
-
-# HTTP 服务器配置
-server:
-  enabled: true    # 是否启用健康检查服务器
-  port: 8080       # 服务器端口
-  path: "/health"  # 健康检查路径
-
-# 分发器配置 (性能优化)
-dispatcher:
-  worker_count: 20         # 工作协程数量 (推荐: CPU核心数 * 2)
-  queue_size: 1000         # 队列大小 (支持突发流量)
-  timeout: 30s             # HTTP请求超时
-  max_retries: 3           # 最大重试次数
-  retry_base_delay: 5s     # 重试基础延迟 (最小1s)
-  max_connections: 100     # 最大连接数
-
-# 监控器配置
-monitor:
-  event_queue_size: 10000  # 事件队列大小 (高负载优化)
-  event_queue_timeout: 2s  # 事件队列超时时间 (快速响应)
-
-# 可选：回调主机地址（用于相对路径的回调URL）
-callback_host: "http://localhost:3000"
-```
-
-2. **任务配置文件** (`tasks.yaml`)：
-
-```yaml
-tasks:
-# 基础示例：监控用户表所有变更
-- task_id: "user_monitor"
-  name: "用户表变更监控"
-  table_name: "users"
-  events: ["insert", "update", "delete"]
-  callback_url: "/webhook/user"  # 相对路径
-
-# 高级示例：只监控订单表的插入和更新
-- task_id: "order_monitor"
-  name: "订单表变更监控"
-  table_name: "orders"
-  events: ["insert", "update"]  # 不监控删除事件
-  callback_url: "https://api.example.com/webhook/order"  # 绝对路径
-
-# 特殊表名示例：MySQL关键字表名
-- task_id: "keyword_table_monitor"
-  name: "关键字表名监控"
-  table_name: "order"  # 'order' 是MySQL关键字，系统自动处理
-  events: ["insert", "update", "delete"]
-  callback_url: "/webhook/order"
-
-# 复杂表名示例：特殊字符和数字开头
-- task_id: "complex_table_monitor"
-  name: "复杂表名监控"
-  table_name: "2024_user-activity_log"  # 包含连字符和数字开头
-  events: ["insert"]
-  callback_url: "/webhook/activity"
-
-# 生产环境示例：外部API回调
-- task_id: "production_sync"
-  name: "生产环境数据同步"
-  table_name: "sync_data"
-  events: ["update"]
-  callback_url: "https://external-api.company.com/v1/sync"
-```
-
-3. **环境特定配置**：
-
-**开发环境** (`config.dev.yaml`)：
-```yaml
-log:
-  level: "debug"
-  format: "text"
-
-dispatcher:
-  worker_count: 2
-  queue_size: 50
-
-monitor:
-  event_queue_size: 100
-```
-
-**生产环境** (`config.prod.yaml`)：
-```yaml
-log:
-  level: "warn"
-  format: "json"
-
-dispatcher:
-  worker_count: 10
-  queue_size: 500
-  timeout: 60s
-  max_retries: 5
-
-monitor:
-  event_queue_size: 2000
-```
-
-#### 运行
-
-```bash
-# 使用默认配置
-./pikachu -config config.yaml
-
-# 使用测试环境配置
-./pikachu -config config.test.yaml
-
-# 使用生产环境配置
-./pikachu -config config.prod.yaml
-```
-
-### 使用 Docker 运行
-
-#### 准备配置文件
-
-确保 `config.yaml` 和 `tasks.yaml` 文件已正确配置。
-
-#### 启动服务
-
-```bash
-docker-compose up -d
-```
-
-## 配置说明
-
-### 数据库配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| host | string | 是 | MySQL 主机地址 |
-| port | int | 是 | MySQL 端口 |
-| user | string | 是 | MySQL 用户名 |
-| password | string | 是 | MySQL 密码 |
-| database | string | 是 | 数据库名称 |
-| server_id | uint32 | 是 | 用于 binlog 同步的唯一 server ID |
-| charset | string | 否 | 字符集，默认为 utf8mb4 |
-
-### 日志配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| level | string | 否 | 日志级别：debug, info, warn, error, fatal, panic (默认: info) |
-| format | string | 否 | 日志格式：text, json (默认: text) |
-
-### 服务器配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| enabled | bool | 否 | 是否启用健康检查服务器 (默认: false) |
-| port | int | 否 | 服务器端口 (默认: 8080) |
-| path | string | 否 | 健康检查路径 (默认: /health) |
-
-### 分发器配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| worker_count | int | 否 | 工作协程数量 (默认: 20) |
-| queue_size | int | 否 | 每 worker 的容量预算，共享队列总容量为 worker_count × queue_size (默认: 1000) |
-| timeout | duration | 否 | HTTP请求超时时间 (默认: 30s) |
-| max_retries | int | 否 | 最大重试次数 (默认: 3) |
-| shutdown_timeout | duration | 否 | 停止生产后等待回调排空的期限，默认 30s，不能为负 |
-| retry_base_delay | duration | 否 | 重试基础延迟 (默认: 5s，最小: 1s，首次实际等待 2 倍) |
-
-***注意**: 如果设置了 `max_retries > 0`，则 `retry_base_delay` 不能小于 1 秒，以避免对目标服务造成过大压力。
-
-### 监控器配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| event_queue_size | int | 否 | 事件队列大小 (默认: 10000) |
-| event_queue_timeout | duration | 否 | 队列拥塞告警间隔，默认 2s，触发后继续等待，不丢事件 |
-
-### 任务配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| task_id | string | 是 | 任务唯一标识，重复值在启动时拒绝 |
-| name | string | 是 | 任务名称 |
-| table_name | string | 是 | 要监控的表名（支持MySQL关键字） |
-| events | []string | 是 | 要监控的事件类型 (insert/update/delete) |
-| callback_url | string | 是 | webhook 回调地址（支持相对路径和绝对路径） |
-
-### 回调主机配置
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| callback_host | string | 否 | 回调主机地址，用于拼接相对路径的回调URL |
-
-## 多环境配置
-
-Pikachu 支持配置文件分离，便于多环境部署：
-
-### 配置文件结构
-
-- **主配置文件**：
-  - `config.yaml` - 默认环境配置
-  - `config.prod.yaml` - 生产环境配置
-  - `config.test.yaml` - 测试环境配置
-
-- **任务配置文件**：
-  - `tasks.yaml` - 任务配置（所有环境共享）
-  - `tasks-example.yaml` - 任务配置示例
-
-### 环境配置差异
-
-**生产环境特点**：
-- 日志级别：warn
-- 日志格式：json
-- 更高的性能参数（更多工作协程、更大队列）
-- 更长的超时和重试设置
-
-**测试环境特点**：
-- 日志级别：debug
-- 日志格式：text
-- 较低的性能参数（较少工作协程、较小队列）
-- 较短的超时和重试设置
-
-## 工作原理
-
-1. **配置加载**: 启动时加载并验证配置文件
-2. **权限检查**: 检查数据库连接和必要权限
-3. **初始化组件**: 初始化监控器、分发器和事件队列
-4. **URL预构建**: 在初始化时预构建所有回调URL，提升运行时性能
-5. **事件监听**: 监控器通过 canal 监听 MySQL binlog 事件
-6. **事件处理**: 捕获的变更事件通过事件队列传递给分发器
-7. **Webhook 发送**: 分发器将事件以 webhook 形式发送到指定地址
-8. **健康检查**: 提供 HTTP 健康检查和系统状态监控
-9. **优雅关闭**: 停止生产后限时排空；超时取消并记录未完成事件
-
-## 权限要求
-
-MySQL 用户需要以下权限：
-- SELECT - 用于查询表结构
-- REPLICATION SLAVE - 用于读取二进制日志
-- REPLICATION CLIENT - 用于获取复制状态信息
-
-## MySQL 配置要求
-
-确保 MySQL 服务器已正确配置：
-- 开启二进制日志：`log_bin=ON`
-- 设置二进制日志格式为 ROW：`binlog_format=ROW`
-- 确保 `server_id` 已设置（全局唯一）
-
-## Webhook 数据格式
-
-发送到回调地址的数据格式如下：
-
-```json
-{
-  "primary_id": 1,
-  "event": "insert",
-  "table": "users",
-  "data": {
-    "id": 1,
-    "name": "John Doe",
-    "email": "john@example.com"
-  },
-  "timestamp": "2023-01-01T12:00:00Z"
-}
-```
-
-根据不同事件类型，数据格式略有不同：
-
-- **INSERT**: 包含 `data` 字段，表示新插入的数据
-- **UPDATE**: 包含 `old_data` 和 `new_data` 字段，分别表示更新前后的数据
-- **DELETE**: 包含 `data` 字段，表示被删除的数据
-
-## 🏥 健康检查与监控
-
-Pikachu 提供了完整的 HTTP 监控端点：
-
-### 🔍 健康检查端点
-
-**端点**: `GET http://<host>:<port>/health`
-
-**响应示例**:
-```json
-{
-  "status": "UP",
-  "monitor_running": true,
-  "dispatcher_running": true,
-  "event_queue_size": 0,
-  "last_event_time": "2023-05-15T10:30:45Z"
-}
-```
-
-**状态说明**:
-- `UP`: 系统正常运行
-- `DOWN`: 系统出现异常
-- `monitor_running`: 监控器是否正在运行
-- `dispatcher_running`: 分发器是否正在运行
-- `event_queue_size`: 当前事件队列中的待处理事件数量
-- `last_event_time`: 最后一次接收到事件的时间
-
-### 📊 系统指标端点
-
-**端点**: `GET http://<host>:<port>/metrics-json`，与健康接口一同由 `server.enabled` 控制；没有 Prometheus `/metrics` 端点。
-
-```json
-{
-  "task_count": 3,
-  "monitor_running": true,
-  "dispatcher_running": true,
-  "event_queue_size": 0,
-  "last_event_time": "2026-10-09T12:00:00Z",
-  "events_queued": 100,
-  "events_succeeded": 99,
-  "events_failed": 0,
-  "events_dropped": 0,
-  "webhook_retries": 2,
-  "cache_size": 1
-}
-```
-
-指标来自分发器使用的同一实例，均为当前进程值：queued 是进入 worker 队列的变更总数；succeeded 是成功回调数；failed 是耗尽重试或被取消、已放弃的变更数；retries 是实际重试次数。dropped 记录最终失败及取消后放弃的事件（单纯拥塞不增加该值）；cache_size 改为 worker 正持有的独立 JSON 载荷数，完成后归零。没有跨事件 JSON 缓存。event_queue_size 仅指 Monitor 输出队列，不含 worker 队列。
-
-组件 running 表示已完成本地初始化且循环未退出，不证明数据库连接的新鲜度或端到端实时性。启动和停止阶段健康接口返回 DOWN；单个回调最终失败不会停止分发器，需通过失败计数监控。
-
-### 🔧 API 响应码说明
-
-| 状态码 | 说明 |
-|--------|------|
-| 200 | 请求成功 |
-| 400 | 请求参数错误 |
-| 404 | 端点不存在 |
-| 500 | 服务器内部错误 |
-| 503 | 服务不可用 |
-
-## 日志说明
-
-程序使用结构化日志记录关键操作和错误信息：
-
-- 支持多种日志级别，可根据需要调整详细程度
-- 支持文本和 JSON 两种日志格式
-- 日志记录包含时间戳、日志级别、消息和相关字段信息
-- 使用 Docker 部署时，日志默认存储在宿主机的 `/data/logs/pikachu` 目录
-
-## 特殊表名支持
-
-pikachu 自动处理各种特殊表名，包括：
-
-### MySQL 关键字表名
-```yaml
-- task_id: "order_monitor"
-  table_name: "order"  # 'order' 是MySQL关键字，系统自动处理
-```
-
-### 特殊字符表名
-```yaml
-- task_id: "special_table_monitor"
-  table_name: "my-table"  # 包含连字符，系统自动处理
-```
-
-### 数字开头表名
-```yaml
-- task_id: "numeric_table_monitor"
-  table_name: "2024_orders"  # 以数字开头，系统自动处理
-```
-
-系统会自动为所有表名添加反引号，确保SQL语句的正确性，无需用户手动处理。
-
-## 性能优化
-
-- **URL预构建优化**: 在初始化时预构建所有回调URL，避免运行时重复计算
-- **关键字处理优化**: 使用高效的反引号包围策略处理MySQL关键字表名
-
-## 🐳 Docker 部署指南
-
-### 📋 部署架构
-
-pikachu 采用多阶段构建策略：
-
-- **编译阶段**: Go 1.25-alpine 构建环境
-- **运行阶段**: 轻量级 alpine 运行环境
-- **安全特性**: 非 root 用户运行，最小权限原则
-- **证书支持**: 预装 ca-certificates 支持 HTTPS
-
-### 🚀 快速部署
-
-**方式一：Docker Compose（推荐）**
-
-```bash
-# 1. 克隆项目
-git clone https://github.com/tiyee/pikachu.git
-cd pikachu
-
-# 2. 配置环境变量
+```sh
 cp config-example.yaml config.yaml
 cp tasks-example.yaml tasks.yaml
-
-# 3. 编辑配置文件
-vim config.yaml  # 配置数据库连接等信息
-vim tasks.yaml    # 配置监控任务
-
-# 4. 启动服务
-docker-compose up -d
-
-# 5. 查看日志
-docker-compose logs -f pikachu
+# 编辑数据库、唯一 server_id、任务表名和 callback_host
+make build
+./pikachu -version
+./pikachu -config config.yaml -tasks tasks.yaml
 ```
 
-**方式二：单独使用 Docker**
+配置文件含数据库凭据，`config.yaml` 和 `tasks.yaml` 均不再受 Git 跟踪，也不进入 Docker 构建上下文。取消跟踪保留本地文件，不清除 Git 历史。主配置示例与任务示例现在可以一起通过配置校验，实际运行仍需对应数据库表及回调服务。
 
-```bash
-# 1. 构建镜像
-docker build -t pikachu:latest .
+路径优先级：命令行 `-config` / `-tasks` → `CONFIG_PATH` / `TASKS_PATH` 环境变量 → 工作目录的 `config.yaml` / `tasks.yaml`。两个相对路径分别基于工作目录，不相互推导。
 
-# 2. 创建数据卷
-docker volume create pikachu-logs
-docker volume create pikachu-config
+独立任务文件读取成功后完全覆盖内联 `tasks`。仅文件不存在且内联任务非空时兼容回退；权限错误、语法错误和未知字段都返回错误。空 tasks 路径按默认 `tasks.yaml` 处理。YAML 严格校验字段，只允许一个文档，不支持配置热重载。
 
-# 3. 运行容器
-docker run -d \
-  --name pikachu \
-  -p 8080:8080 \
-  -v $(pwd)/config.yaml:/app/config.yaml:ro \
-  -v $(pwd)/tasks.yaml:/app/tasks.yaml:ro \
-  -v pikachu-logs:/app/logs \
-  pikachu:latest
-```
+## MySQL 要求
 
-### ⚙️ 生产环境部署
+- 开启 `log_bin`，使用 `binlog_format=ROW` 和 `binlog_row_image=FULL`。
+- 所有写入连接也必须使用 FULL 行镜像，不应在会话中改为 MINIMAL / NOBLOB。启动校验读取全局设置；canal 行事件不提供省略列标识，无法区分省略值与 SQL NULL。
+- 配置与其他复制客户端不冲突的 `server_id`。多副本独立消费，会产生重复回调。
+- 账号需要任务表的 SELECT，以及 REPLICATION CLIENT、REPLICATION SLAVE 权限。
 
-**Docker Compose 生产配置**:
+权限通过实际 SELECT、master status 查询和复制握手验证，支持账号的实际生效权限，不解析 SHOW GRANTS 字符串或推测角色权限。表元数据由 canal 管理，DDL 后按需刷新，没有额外的跨事件 schema 缓存。
+
+复制 Flavor 固定为 mysql，MariaDB 不在当前支持范围。真实 MySQL 版本兼容性应在部署环境验证，协议模拟测试不能代替数据库集成测试。
+
+## 配置
+
+完整主配置见 `config-example.yaml`，环境示例见 `config.prod.yaml`、`config.test.yaml`，任务格式见 `tasks-example.yaml`。
+
+### 数据库
+
+| 配置 | 默认值 / 含义 |
+| --- | --- |
+| host / port / user / database / server_id | 必填；port 为 1–65535，server_id 非零 |
+| password | 数据库密码 |
+| charset | utf8mb4 |
+| connect_timeout | 10s，连接建立超时 |
+| read_timeout | 30s，每次数据库读写等待超时；复制心跳周期为其一半 |
+
+### Dispatcher
+
+| 配置 | 默认值 / 含义 |
+| --- | --- |
+| worker_count | 20；最大 1000 |
+| queue_size | 1000；共享队列总容量为 worker_count × queue_size，单项最大 100000 |
+| timeout | 30s，单次 HTTP 请求超时 |
+| max_retries | YAML 中省略时为 3，显式 0 禁用重试，负值拒绝；总尝试次数为 1 + max_retries |
+| retry_base_delay | 5s；启用重试时至少 1s，首次实际等待 2 倍 base |
+| retry_max_delay | 60s，必须严格大于 base |
+| shutdown_timeout | 30s；零使用默认值，负值拒绝 |
+| max_connections | 100，每个回调主机的连接上限 |
+| max_idle_conns | 20，全局空闲连接上限 |
+| idle_conn_timeout | 90s |
+
+队列限制按事件数量计，不是按字节计。大行或慢回调会增加内存使用和积压，应按实际负载调节容量及并发。
+
+### Monitor
+
+| 配置 | 默认值 / 含义 |
+| --- | --- |
+| event_queue_size | 10000 |
+| event_queue_timeout | 2s；队列拥塞告警间隔，告警后继续等待 |
+
+批处理没有实现。`dispatcher.batch_size/batch_timeout` 和 `monitor.batch_size/batch_timeout/flush_interval` 已废弃并从示例移除；只接受旧示例默认值作为兼容设置，其他值直接报错，不再静默忽略用户的批处理要求。
+
+### 回调与任务
 
 ```yaml
-version: '3.8'
-
-services:
-  pikachu:
-    image: pikachu:latest
-    container_name: pikachu-prod
-    restart: unless-stopped
-
-    # 环境变量
-    environment:
-      - TZ=Asia/Shanghai
-
-    # 端口映射
-    ports:
-      - "8080:8080"
-
-    # 卷挂载
-    volumes:
-      - ./config.prod.yaml:/app/config.yaml:ro
-      - ./tasks.yaml:/app/tasks.yaml:ro
-      - /data/logs/pikachu:/app/logs
-      - /etc/localtime:/etc/localtime:ro
-
-    # 资源限制
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 128M
-          cpus: '0.1'
-
-    # 健康检查
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-    # 网络配置
-    networks:
-      - pikachu-network
-
-    # 日志配置
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-networks:
-  pikachu-network:
-    driver: bridge
+callback_host: "https://api.example.com/base"
+tasks:
+  - task_id: user_monitor
+    name: 用户变更
+    table_name: users
+    events: [insert, update, delete]
+    callback_url: /webhook/users
 ```
 
-### 🔧 Kubernetes 部署
+最终地址为 `https://api.example.com/base/webhook/users`。绝对 HTTP(S) 回调直接使用；相对路径必须配置有效的 `callback_host`。主机地址不接受 query、fragment 或 userinfo；`//other-host/path` 形式拒绝。最终 URL 和端口在启动时校验。
 
-**Deployment 配置**:
+`task_id` 必须唯一，不同任务可监控同一张表；重复事件类型自动去重。表名使用原始名称，无需手动添加反引号，内部反引号会转义。
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pikachu
-  namespace: monitoring
-  labels:
-    app: pikachu
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: pikachu
-  template:
-    metadata:
-      labels:
-        app: pikachu
-    spec:
-      containers:
-      - name: pikachu
-        image: pikachu:latest
-        ports:
-        - containerPort: 8080
-          name: http
-        env:
-        - name: TZ
-          value: "Asia/Shanghai"
-        volumeMounts:
-        - name: config
-          mountPath: /app/config.yaml
-          subPath: config.yaml
-          readOnly: true
-        - name: config
-          mountPath: /app/tasks.yaml
-          subPath: tasks.yaml
-          readOnly: true
-        - name: logs
-          mountPath: /app/logs
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
-      volumes:
-      - name: config
-        configMap:
-          name: pikachu-config
-      - name: logs
-        emptyDir: {}
+### 日志与健康服务
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: pikachu-service
-  namespace: monitoring
-spec:
-  selector:
-    app: pikachu
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 8080
-    name: http
-  type: ClusterIP
+| 配置 | 默认值 / 含义 |
+| --- | --- |
+| log.level | info；debug / info / warn / error / fatal / panic |
+| log.format | text；text 写 stdout，json 写文件 |
+| log.directory | logs，JSON 日志目录，自动创建 |
+| log.max_size | 100，单个日志文件最大 MiB |
+| log.max_backups | 5，轮转备份数 |
+| log.max_age | 7，备份保留天数，备份 gzip 压缩 |
+| server.enabled | false；同时控制健康及指标接口 |
+| server.port | 启用时为 8080 |
+| server.path | /health；不能与 /metrics-json 冲突 |
+
+JSON 业务日志写入 `output.log`，`error.log` 仅记录 zap 内部错误，不是业务 error 分流。目录或文件不可写时返回启动错误。使用目录挂载时，目录必须可被容器 UID/GID 10001 写入。
+
+## Webhook 载荷
+
+```json
+{
+  "event": "insert",
+  "table": "users",
+  "primary_id": 1,
+  "data": {"id": 1, "name": "Alice"},
+  "timestamp": "2026-10-09T12:00:00+08:00"
+}
 ```
 
-### 📊 性能调优
+INSERT / DELETE 使用 `data`；UPDATE 使用 `old_data`、`new_data`。复合主键的 `primary_id` 为对象；没有 PRIMARY 时尝试 `id`，否则为 null。时间戳是程序处理行事件时的时间，不是事务提交时间。没有事件 ID 或事务聚合载荷。
 
-#### 🎯 环境配置优化
+## 健康与指标
 
-**开发环境**:
-```yaml
-log:
-  level: "debug"
-  format: "text"
+启用 `server.enabled` 后：
 
-dispatcher:
-  worker_count: 2
-  queue_size: 50
-  timeout: 10s
+- `GET /health`（或配置路径）：`status`、`monitor_running`、`dispatcher_running`、`event_queue_size`、`last_event_time`。组件未运行时返回 503。
+- `GET /metrics-json`：上述组件状态及 `task_count`、`events_queued`、`events_succeeded`、`events_failed`、`events_dropped`、`webhook_retries`、`cache_size`。
 
-monitor:
-  event_queue_size: 100
+running 表示本地循环存活，不代表复制连接新鲜度或端到端实时性。单个回调失败不会令健康接口变为 DOWN，应观察失败与积压指标。
+
+所有计数只在当前进程有效。queued 表示进入 worker 队列的累计数；succeeded 为成功数；failed/dropped 为最终失败或取消后放弃数；retries 为实际发起的重试次数。`cache_size` 保留兼容名称，表示 worker 当前持有的独立 JSON 数量，结束后减回。`event_queue_size` 只统计 Monitor 输出队列，不包含 Dispatcher 队列。没有 Prometheus `/metrics`、uptime、version 或位点接口。
+
+## Docker 部署
+
+镜像使用已固定摘要的 Go 1.27.1 Alpine 构建阶段与 Alpine 3.24 运行阶段。运行用户为 UID/GID 10001，包含 CA 证书及 tzdata；`.dockerignore` 使用允许列表排除实际配置、凭据、日志和本地辅助文件。
+
+```sh
+# 示例配置只需复制一次，随后填入实际连接及任务设置
+cp config-example.yaml config.yaml
+cp tasks-example.yaml tasks.yaml
+sudo install -d -o 10001 -g 10001 -m 0750 /data/logs/pikachu
+# 让容器组只读配置，其他用户不能读取凭据
+sudo chgrp 10001 config.yaml tasks.yaml
+chmod 0640 config.yaml tasks.yaml
+docker compose up -d --build
 ```
 
-**生产环境**:
-```yaml
-log:
-  level: "warn"
-  format: "json"
+Compose 挂载配置只读及日志目录，不提供位点数据卷。若使用其他运行 UID，需同步宿主机目录及文件权限。命令行参数会覆盖环境变量路径，例如：
 
-dispatcher:
-  worker_count: 10-20  # 根据 CPU 核心数调整
-  queue_size: 500-1000  # 根据内存容量调整
-  timeout: 60s
-  max_retries: 5
-
-monitor:
-  event_queue_size: 2000-5000
+```sh
+docker run --rm pikachu -version
 ```
 
-#### 🚀 高负载优化
+## 检查与发布
 
-```yaml
-# 高并发场景配置
-dispatcher:
-  worker_count: 50        # 更多工作协程
-  queue_size: 2000       # 更大的队列
-  timeout: 120s          # 更长的超时时间
-  max_retries: 10        # 更多重试次数
-  retry_base_delay: 30s  # 更长的重试间隔
-
-monitor:
-  event_queue_size: 10000  # 更大的事件队列
-```
-
-#### 💾 资源监控
-
-**关键指标**:
-- 事件处理延迟（目标：< 100ms）
-- Webhook 成功率（目标：> 99.9%）
-- 队列使用率（目标：< 80%）
-- 内存使用量
-- CPU 使用率
-
-## 常见问题与排查
-
-### 连接 MySQL 失败
-- 检查数据库连接配置是否正确
-- 验证 MySQL 用户权限是否满足要求
-- 确认 MySQL 服务器是否开启了二进制日志
-- 检查 MySQL 服务器网络连接是否正常
-
-### 事件未触发
-- 检查监控的表名是否正确
-- 确认配置的事件类型（insert/update/delete）是否正确
-- 验证 MySQL 二进制日志格式是否为 ROW
-- 检查是否有数据变更发生
-
-### Webhook 回调失败
-- 检查回调 URL 是否可访问
-- 查看日志中的错误信息
-- 确认网络连接和防火墙设置
-- 检查回调服务是否正常运行
-
-### 配置文件问题
-- 确认 `tasks.yaml` 文件存在且格式正确
-- 检查配置文件语法是否正确
-- 查看启动日志中的配置加载信息
-
-## 迁移指南
-
-### 从旧版本迁移
-
-1. **备份现有配置**
-```bash
-cp config.yaml config.yaml.backup
-```
-
-2. **提取任务配置**
-从现有的 `config.yaml` 中复制 `tasks` 部分到新的 `tasks.yaml` 文件
-
-3. **更新主配置文件**
-从 `config.yaml` 中移除 `tasks` 部分
-
-4. **验证配置**
-```bash
-./pikachu -config config.yaml
-```
-
-新版本保持向后兼容，如果 `tasks.yaml` 不存在，系统会尝试从主配置文件中加载任务配置。
-
-## 开发与测试
-
-### 运行测试
-```bash
+```sh
+go build ./...
+go vet ./...
 go test ./...
+go test -race ./...
+make ci
+# 额外静态检查，需要单独安装 golangci-lint
+make lint
 ```
 
-### 运行基准测试
-```bash
-go test -bench=. ./...
-```
+`make ci` 验证格式及模块、构建、vet、race 和覆盖率，不运行 tidy 或改写格式。`cmd/test-runner` 汇总失败后非零退出，无交互询问。测试位于对应包旁；Monitor 使用合成行事件及本地 MySQL 协议服务器，Dispatcher 使用 httptest，不连接业务数据库或外部 webhook。真实 MySQL、容器运行和负载测试需独立验证。
 
-### 构建生产版本
-```bash
-go build -ldflags="-s -w" -o pikachu .
-```
+PR / 分支提交运行 `.github/workflows/ci.yml`，构建、vet、race 全部通过后才允许发布 workflow 构建及推送 ACR 镜像。版本输入通过环境变量传入 shell 后校验，镜像创建时间由 UTC 实际时间生成。镜像标签不自动修改二进制版本，版本变更需更新 `internal/utils/utils.go` 的 Version。
 
-## 🎯 实际使用场景
-
-### 场景一：微服务数据同步
-```yaml
-# 用户服务 -> 订单服务 数据同步
-tasks:
-- task_id: "user_sync_to_order"
-  name: "用户信息同步到订单服务"
-  table_name: "users"
-  events: ["update"]  # 只同步用户信息变更
-  callback_url: "https://order-service.internal/api/user-updates"
-
-- task_id: "profile_sync_to_notification"
-  name: "用户资料同步到通知服务"
-  table_name: "user_profiles"
-  events: ["insert", "update"]
-  callback_url: "/api/sync/user-profile"  # 相对路径，使用 callback_host
-```
-
-### 场景二：搜索引擎索引更新
-```yaml
-# 商品表变更 -> Elasticsearch 索引更新
-tasks:
-- task_id: "product_index_update"
-  name: "商品搜索引擎索引更新"
-  table_name: "products"
-  events: ["insert", "update", "delete"]
-  callback_url: "https://search-service.internal/index/product"
-
-- task_id: "category_index_update"
-  name: "分类索引更新"
-  table_name: "product_categories"
-  events: ["insert", "update", "delete"]
-  callback_url: "https://search-service.internal/index/category"
-```
-
-### 场景三：审计日志记录
-```yaml
-# 敏感操作审计日志
-tasks:
-- task_id: "financial_audit"
-  name: "财务操作审计"
-  table_name: "financial_transactions"
-  events: ["insert", "update", "delete"]
-  callback_url: "https://audit-service.internal/log/financial"
-
-- task_id: "user_action_audit"
-  name: "用户操作审计"
-  table_name: "user_action_logs"
-  events: ["insert"]
-  callback_url: "https://audit-service.internal/log/user-actions"
-```
-
-### 场景四：缓存失效通知
-```yaml
-# 数据变更 -> Redis 缓存失效
-tasks:
-- task_id: "cache_invalidation"
-  name: "缓存失效通知"
-  table_name: "user_preferences"
-  events: ["update", "delete"]
-  callback_url: "https://cache-service.internal/invalidate/user"
-
-- task_id: "product_cache_invalidation"
-  name: "商品缓存失效"
-  table_name: "products"
-  events: ["update", "delete"]
-  callback_url: "https://cache-service.internal/invalidate/product"
-```
-
-### 场景五：实时数据推送
-```yaml
-# 实时通知 -> WebSocket 服务
-tasks:
-- task_id: "realtime_notification"
-  name: "实时数据推送"
-  table_name: "notifications"
-  events: ["insert"]
-  callback_url: "https://websocket-service.internal/push/notification"
-
-- task_id: "order_status_update"
-  name: "订单状态实时推送"
-  table_name: "order_status_history"
-  events: ["insert"]
-  callback_url: "https://websocket-service.internal/push/order-status"
-```
-
-### 场景六：数据仓库同步
-```yaml
-# OLTP -> OLAP 数据同步
-tasks:
-- task_id: "data_warehouse_sync"
-  name: "数据仓库同步"
-  table_name: "sales_transactions"
-  events: ["insert", "update"]
-  callback_url: "https://data-warehouse.internal/api/sync/sales"
-
-- task_id: "analytics_sync"
-  name: "分析数据同步"
-  table_name: "user_behavior_events"
-  events: ["insert"]
-  callback_url: "https://analytics-service.internal/api/events"
-```
-
-### 场景七：复杂业务流程触发
-```yaml
-# 业务流程自动化触发
-tasks:
-- task_id: "order_workflow"
-  name: "订单工作流触发"
-  table_name: "orders"
-  events: ["insert", "update"]
-  callback_url: "https://workflow-service.internal/trigger/order-process"
-
-- task_id: "inventory_restock"
-  name: "库存补货触发"
-  table_name: "inventory"
-  events: ["update"]
-  callback_url: "https://inventory-service.internal/trigger/restock"
-```
-
-## 📝 更新日志
-
-### v1.0.0 (2024-01-15)
-#### 🎉 新功能
-- ✨ 支持 MySQL 5.6+ 和 MariaDB 10.0+
-- ✨ 实时 binlog 事件捕获
-- ✨ 灵活的 webhook 回调配置
-- ✨ 多环境配置支持
-- ✨ 健康检查和监控端点
-- ✨ Docker 和 Kubernetes 部署支持
-
-#### 🚀 性能优化
-- ⚡ URL 预构建优化
-- ⚡ 协程池并发处理
-- ⚡ 智能重试机制
-- ⚡ 事件队列缓冲
-
-#### 🛠️ 技术特性
-- 🔧 自动处理 MySQL 关键字表名
-- 🔧 结构化日志记录
-- 🔧 优雅关闭机制
-- 🔧 配置热重载支持
-
-## 🤝 贡献指南
-
-我们欢迎所有形式的贡献！请遵循以下步骤：
-
-### 🐛 报告问题
-1. 使用 [GitHub Issues](https://github.com/tiyee/pikachu/issues) 报告 bug
-2. 提供详细的问题描述和复现步骤
-3. 包含相关的日志和配置信息
-4. 标明运行环境（操作系统、Go版本、MySQL版本等）
-
-### 💡 功能请求
-1. 在 Issues 中描述新功能需求
-2. 说明使用场景和预期行为
-3. 提供可能的实现方案（如有）
-
-### 🔧 代码贡献
-1. Fork 项目仓库
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 编写代码和测试
-4. 确保所有测试通过 (`make test-all`)
-5. 提交代码 (`git commit -m 'Add amazing feature'`)
-6. 推送到分支 (`git push origin feature/amazing-feature`)
-7. 创建 Pull Request
-
-### 📋 开发规范
-- 遵循 Go 语言编码规范
-- 添加适当的单元测试和集成测试
-- 更新相关文档
-- 确保所有测试通过
-- 代码覆盖率不低于 80%
-
-### 🔍 代码审查
-- 所有 PR 需要至少一个维护者审查
-- 自动化 CI/CD 检查必须通过
-- 确保向后兼容性
-- 文档同步更新
-
-## 📞 支持与联系
-
-- 📧 邮箱: tiyee@outlook.com
-- 💬 讨论: [GitHub Discussions](https://github.com/tiyee/pikachu/discussions)
-- 🐛 问题: [GitHub Issues](https://github.com/tiyee/pikachu/issues)
-- 📖 文档: [官方文档](https://github.com/tiyee/pikachu)
-
-## 📄 许可证
-
-本项目采用 [MIT License](LICENSE) 开源协议。
-
----
-
-<p align="center">
-  <strong>⭐ 如果这个项目对您有帮助，请给我们一个 Star！</strong>
-</p>
-
-<p align="center">
-  Made with ❤️ by <a href="https://github.com/tiyee">tiyee</a>
-</p>
+项目采用 MIT 许可证，见 LICENSE。

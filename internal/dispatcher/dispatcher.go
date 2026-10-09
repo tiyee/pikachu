@@ -40,7 +40,7 @@ func New(cfg *types.Config, eventQueue <-chan *types.ChangeEvent, collector *met
 		config: cfg, eventQueue: eventQueue, ctx: ctx, cancel: cancel,
 		jobs:    make(chan *types.ChangeEvent, cfg.Dispatcher.QueueSize*cfg.Dispatcher.WorkerCount),
 		taskMap: make(map[string]string), metrics: collector, done: make(chan struct{}),
-		httpClient: &http.Client{Timeout: cfg.Dispatcher.Timeout, Transport: &http.Transport{
+		httpClient: &http.Client{Timeout: cfg.Dispatcher.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{
 			MaxIdleConns: cfg.Dispatcher.MaxIdleConns, MaxIdleConnsPerHost: cfg.Dispatcher.MaxIdleConns / 2,
 			IdleConnTimeout: cfg.Dispatcher.IdleConnTimeout, MaxConnsPerHost: cfg.Dispatcher.MaxConnections,
 		}},

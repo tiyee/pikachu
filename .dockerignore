@@ -1,0 +1,16 @@
+# 构建只包含应用源码与模块文件；本地配置和凭据不进入任何镜像层。
+**
+!go.mod
+!go.sum
+!main.go
+!internal/
+!internal/**
+!Dockerfile
+!docker-compose.yml
+!config-example.yaml
+!config.prod.yaml
+!config.test.yaml
+!tasks-example.yaml
+!README.md
+**/*_test.go
+internal/testutil/

@@ -61,14 +61,12 @@ func (z *ZapSlogAdapter) Enabled(ctx context.Context, level slog.Level) bool {
 // 返回: 错误信息
 func (z *ZapSlogAdapter) Handle(ctx context.Context, r slog.Record) error {
 	// 获取调用者信息，跳过适配器和slog包的调用栈
-	pcs := make([]uintptr, 1)
-	runtime.Callers(6, pcs) // 跳过更多调用栈以找到真正的调用者
-	frame, _ := runtime.CallersFrames(pcs).Next()
+	frame, _ := runtime.CallersFrames([]uintptr{r.PC}).Next()
 
 	// 构建zap字段
 	fields := make([]zapcore.Field, 0, r.NumAttrs()+3) // 预分配空间，包含调用者信息
 	r.Attrs(func(attr slog.Attr) bool {
-		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
+		fields = append(fields, z.convertAttrsToZapFields([]slog.Attr{attr})...)
 		return true
 	})
 
@@ -126,7 +124,10 @@ func (z *ZapSlogAdapter) WithAttrs(attrs []slog.Attr) slog.Handler {
 // 返回: 新的slog.Handler
 func (z *ZapSlogAdapter) WithGroup(name string) slog.Handler {
 	// 创建带有组名的新logger
-	newLogger := z.logger.With(zap.String("group", name))
+	if name == "" {
+		return z
+	}
+	newLogger := z.logger.With(zap.Namespace(name))
 	// 返回新的适配器
 	return NewZapSlogAdapter(newLogger)
 }
@@ -137,7 +138,37 @@ func (z *ZapSlogAdapter) WithGroup(name string) slog.Handler {
 func (z *ZapSlogAdapter) convertAttrsToZapFields(attrs []slog.Attr) []zapcore.Field {
 	fields := make([]zapcore.Field, 0, len(attrs))
 	for _, attr := range attrs {
-		fields = append(fields, zap.Any(attr.Key, attr.Value.Any()))
+		if attr.Equal(slog.Attr{}) {
+			continue
+		}
+		value := attr.Value.Resolve()
+		if value.Kind() == slog.KindGroup {
+			group := value.Group()
+			if len(group) == 0 {
+				continue
+			}
+			if attr.Key == "" {
+				fields = append(fields, z.convertAttrsToZapFields(group)...)
+			} else {
+				fields = append(fields, zap.Object(attr.Key, slogGroup{adapter: z, attrs: group}))
+			}
+		} else {
+			fields = append(fields, zap.Any(attr.Key, value.Any()))
+		}
 	}
+
 	return fields
+}
+
+// slogGroup 将属性组编码为嵌套对象，保留空组名的展开语义。
+type slogGroup struct {
+	adapter *ZapSlogAdapter
+	attrs   []slog.Attr
+}
+
+func (g slogGroup) MarshalLogObject(encoder zapcore.ObjectEncoder) error {
+	for _, field := range g.adapter.convertAttrsToZapFields(g.attrs) {
+		field.AddTo(encoder)
+	}
+	return nil
 }

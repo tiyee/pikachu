@@ -1,48 +1,23 @@
-# 第一阶段：编译阶段
-FROM golang:latest AS builder
-
-# 设置工作目录
+# 固定版本与多架构清单摘要，更新时同时运行 CI。
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 WORKDIR /app
-ENV GO111MODULE=on
-ENV GOPROXY=https://goproxy.cn,direct
-# 复制go.mod和go.sum文件并下载依赖
 COPY go.mod go.sum ./
 RUN go mod download
-
-# 复制源代码
 COPY . .
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -ldflags="-w -s" -o /pikachu .
 
-# 编译应用程序
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o pikachu
-
-# 第二阶段：运行阶段
-FROM alpine:latest
-
-# 创建日志目录
-RUN mkdir -p /app/logs
-# 安装证书以支持HTTPS
-RUN apk --no-cache add ca-certificates
-
-# 设置工作目录
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+RUN apk --no-cache add ca-certificates tzdata \
+    && addgroup -g 10001 -S pikachu \
+    && adduser -u 10001 -S -G pikachu pikachu \
+    && mkdir -p /app/logs \
+    && chown -R pikachu:pikachu /app
 WORKDIR /app
-
-# 从编译阶段复制二进制文件
-COPY --from=builder /app/pikachu .
-
-# 复制配置文件
-# COPY config.yaml .
-# COPY tasks.yaml .
-
-
-# 声明卷以持久化日志
+COPY --from=builder --chown=pikachu:pikachu /pikachu /app/pikachu
+USER 10001:10001
 VOLUME /app/logs
-
-# 暴露健康检查端口
 EXPOSE 8080
-
-# 设置环境变量
-ENV CONFIG_PATH=config.yaml
-ENV TASKS_PATH=tasks.yaml
-
-# 运行应用程序
-CMD ["./pikachu", "-config", "config.yaml", "-tasks", "tasks.yaml"]
+ENV CONFIG_PATH=/app/config.yaml TASKS_PATH=/app/tasks.yaml
+ENTRYPOINT ["/app/pikachu"]

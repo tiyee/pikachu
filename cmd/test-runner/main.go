@@ -55,7 +55,8 @@ func main() {
 		fmt.Printf("Error creating test-results directory: %v\n", err)
 	}
 
-	for i, cmd := range testCommands {
+	failed := false
+	for _, cmd := range testCommands {
 		fmt.Printf("\n📋 Running %s...\n", cmd.name)
 		fmt.Println(strings.Repeat("-", 50))
 
@@ -66,21 +67,16 @@ func main() {
 		if err := testCmd.Run(); err != nil {
 			fmt.Printf("❌ %s failed: %v\n", cmd.name, err)
 
-			// Ask user if they want to continue
-			if i < len(testCommands)-1 {
-				fmt.Print("\nContinue with remaining tests? (y/n): ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "y" && response != "Y" {
-					fmt.Println("Test suite aborted by user.")
-					os.Exit(1)
-				}
-			}
+			failed = true
 		} else {
 			fmt.Printf("✅ %s passed\n", cmd.name)
 		}
 	}
 
+	if failed {
+		fmt.Println("Test suite failed.")
+		os.Exit(1)
+	}
 	fmt.Println("\n🎉 Test suite completed!")
 	fmt.Println("================================")
 

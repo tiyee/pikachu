@@ -1,8 +1,9 @@
 package log
 
 import (
-	"go.uber.org/zap"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 func String(key string, value string) zap.Field {
@@ -41,6 +42,6 @@ func Float32(key string, value float32) zap.Field {
 func Float64(key string, value float64) zap.Field {
 	return zap.Float64(key, value)
 }
-func Any(key string, value interface{}) zap.Field {
+func Any(key string, value any) zap.Field {
 	return zap.Any(key, value)
 }

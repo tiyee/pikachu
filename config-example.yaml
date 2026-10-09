@@ -1,4 +1,6 @@
 database:
+  connect_timeout: 10s # 建立数据库连接的超时
+  read_timeout: 30s # 数据库读写等待超时，复制心跳周期为其一半
   host: "localhost"
   port: 3306
   user: "root"
@@ -8,6 +10,10 @@ database:
   # charset: "utf8mb4" # 可配置，不设置则默认为utf8mb4
 
 log:
+  directory: "logs" # JSON 日志目录
+  max_size: 100 # 每个日志文件的最大 MiB
+  max_backups: 5 # 保留备份数
+  max_age: 7 # 备份保留天数
   level: "info" # debug, info, warn, error, fatal, panic
   format: "text" # text, json
 
@@ -29,16 +35,13 @@ dispatcher:
   max_idle_conns: 20       # 最大空闲连接数 (连接池优化)
   idle_conn_timeout: 90s   # 空闲连接超时
   # 注意: 保持HTTP/1.1兼容性，不强制HTTP/2，确保与各种回调服务端兼容
-  batch_size: 1            # 批处理大小 (默认1，保持实时性)
-  batch_timeout: 100ms     # 批处理超时
 
 # 监控器配置 (优化后的高性能配置)
 monitor:
   event_queue_size: 10000    # 事件队列大小 (大幅增加缓冲)
   event_queue_timeout: 2s    # 队列拥塞告警间隔，超时后继续等待
-  batch_size: 1              # 批处理大小 (默认1，保持实时性)
-  batch_timeout: 50ms        # 批处理超时
-  flush_interval: 1s         # 刷新间隔
 
 # 注意：任务配置已分离到 tasks.yaml 文件中
 # 请参考 tasks-example.yaml 文件了解任务配置格式
+
+callback_host: "http://localhost:3000" # 相对回调路径必须配置 HTTP(S) 主机
