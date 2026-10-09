@@ -36,11 +36,11 @@ func GetEventTaskId(tableName, eventType string) string {
 func EscapeRegexForTable(database, table string) string {
 	escapedDatabase := regexp.QuoteMeta(database)
 	escapedTable := regexp.QuoteMeta(table)
-	return escapedDatabase + "\\." + escapedTable
+	return "^" + escapedDatabase + "\\." + escapedTable + "$"
 }
 
 // Errorf 创建格式化错误
-func Errorf(format string, args ...interface{}) error {
+func Errorf(format string, args ...any) error {
 	return fmt.Errorf("ERROR: "+format, args...)
 }
 

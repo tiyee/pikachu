@@ -19,6 +19,7 @@ server:
 
 # 分发器配置 - 测试环境较低资源
 dispatcher:
+  shutdown_timeout: 30s # 停止生产后等待回调排空，超时取消未完成任务并统计丢弃
   worker_count: 2     # 较少工作协程
   queue_size: 50      # 较小队列
   timeout: 10s        # 较短超时
@@ -28,7 +29,7 @@ dispatcher:
 # 监控器配置
 monitor:
   event_queue_size: 100    # 较小事件队列
-  event_queue_timeout: 3s  # 较短超时时间
+  event_queue_timeout: 3s  # 队列拥塞告警间隔
 
 # 回调主机配置 - 用于不同环境
 callback_host: "http://test-api.example.com" # 测试环境回调主机地址

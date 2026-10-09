@@ -18,6 +18,7 @@ server:
 
 # 分发器配置 (优化后的高性能配置)
 dispatcher:
+  shutdown_timeout: 30s # 停止生产后等待回调排空，超时取消未完成任务并统计丢弃
   worker_count: 20         # 工作协程数量 (提高并发处理能力)
   queue_size: 1000         # 队列大小 (增加缓冲区)
   timeout: 30s             # HTTP请求超时
@@ -34,7 +35,7 @@ dispatcher:
 # 监控器配置 (优化后的高性能配置)
 monitor:
   event_queue_size: 10000    # 事件队列大小 (大幅增加缓冲)
-  event_queue_timeout: 2s    # 事件队列超时时间 (减少延迟)
+  event_queue_timeout: 2s    # 队列拥塞告警间隔，超时后继续等待
   batch_size: 1              # 批处理大小 (默认1，保持实时性)
   batch_timeout: 50ms        # 批处理超时
   flush_interval: 1s         # 刷新间隔
